@@ -15,17 +15,31 @@
 // You should have received a copy of the GNU General Public License
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
-#include <Eigen/Dense>
-#include <boost/filesystem.hpp>
-#include <boost/program_options.hpp>
+// System
 #include <fstream>
 #include <iostream>
+
+// Glog
+#include <glog/logging.h>
+
+// Boost
+#include <boost/filesystem.hpp>
+#include <boost/program_options.hpp>
+
+// Eigen
+#include <Eigen/Dense>
+
+// OpenCV
 #include <opencv2/highgui/highgui.hpp>
+
+// PSL
 #include <psl_base/cameraMatrix.h>
 #include <psl_base/exception.h>
 #include <psl_stereo/cudaPlaneSweep.h>
 
-void makeOutputFolder(std::string folderName) {
+namespace {
+
+void MakeOutputFolder(std::string folderName) {
   if (!boost::filesystem::exists(folderName)) {
     if (!boost::filesystem::create_directory(folderName)) {
       std::stringstream errorMsg;
@@ -33,6 +47,174 @@ void makeOutputFolder(std::string folderName) {
       PSL_THROW_EXCEPTION(errorMsg.str().c_str());
     }
   }
+}
+
+Eigen::Matrix3d LoadKMatrixFromFile(const std::string &filepath) {
+
+  Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
+  {
+    // try to load k matrix
+    std::ifstream kMatrixStr;
+    kMatrixStr.open(filepath.c_str());
+
+    if (!kMatrixStr.is_open()) {
+      PSL_THROW_EXCEPTION("Error opening K matrix file.")
+    }
+
+    {
+      kMatrixStr >> K(0, 0);
+      kMatrixStr >> K(0, 1);
+      kMatrixStr >> K(0, 2);
+      kMatrixStr >> K(1, 1);
+      kMatrixStr >> K(1, 2);
+    }
+  }
+  return K;
+}
+
+std::map<int, PSL::CameraMatrix<double>>
+LoadCameraMatrixFromFile(const std::string &filepath,
+                         const Eigen::Matrix3d &K) {
+
+  std::map<int, PSL::CameraMatrix<double>> cameras;
+  {
+    // Poses are computed with Christopher Zach's publicly available V3D Soft
+    std::ifstream posesStr;
+    posesStr.open(filepath.c_str());
+
+    if (!posesStr.is_open()) {
+      PSL_THROW_EXCEPTION("Could not load camera poses");
+    }
+
+    int numCameras;
+    posesStr >> numCameras;
+    for (int c = 0; c < numCameras; c++) {
+      int id;
+      posesStr >> id;
+
+      Eigen::Matrix<double, 3, 3> R;
+      Eigen::Matrix<double, 3, 1> T;
+
+      for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+          posesStr >> R(i, j);
+        }
+        posesStr >> T(i);
+      }
+
+      cameras[id].setKRT(K, R, T);
+    }
+  }
+  return cameras;
+}
+
+void LoadImageFilePaths(const std::string &filepath,
+                        const std::string &data_dir,
+                        std::vector<std::string> &image_file_names,
+                        std::vector<std::string> &image_file_paths) {
+
+  {
+    std::string imageListFile = filepath;
+    std::ifstream imagesStream;
+    imagesStream.open(imageListFile.c_str());
+    CHECK(imagesStream.is_open()) << "Could not load images list file";
+
+    {
+      std::string imageFileName;
+      while (imagesStream >> imageFileName) {
+        image_file_names.push_back(imageFileName);
+        image_file_paths.push_back(data_dir + "/" + imageFileName);
+      }
+    }
+
+    CHECK_EQ(image_file_names.size(), 25)
+        << "The dataset does not contain 25 images";
+  }
+}
+
+void CalculateMinMaxRange(const int image_num,
+                          std::map<int, PSL::CameraMatrix<double>> &cameras,
+                          float &minZ, float &maxZ) {
+  {
+    // Each of the datasets contains 25 cameras taken in 5 rows
+    // The reconstructions are not metric. In order to have an idea about the
+    // scale
+    // everything is defined with respect to the average distance between the
+    // cameras.
+    double avgDistance = 0;
+    int numDistances = 0;
+
+    for (unsigned int i = 0; i < image_num - 1; i++) {
+      if (cameras.count(i) == 1) {
+        for (unsigned int j = i + 1; j < image_num; j++) {
+          if (cameras.count(j) == 1) {
+            Eigen::Vector3d distance = cameras[i].getC() - cameras[j].getC();
+
+            avgDistance += distance.norm();
+            numDistances++;
+          }
+        }
+      }
+    }
+    CHECK_GT(numDistances, 1)
+        << "Could not compute average distance, less than two cameras found";
+
+    avgDistance /= numDistances;
+    std::cout << "Cameras have an average distance of " << avgDistance << "."
+              << std::endl;
+
+    minZ = (float)(2.5f * avgDistance);
+    maxZ = (float)(100.0f * avgDistance);
+    std::cout << "  Z range :  " << minZ << "  - " << maxZ << std::endl;
+  }
+}
+
+PSL::CudaPlaneSweep
+CreateCudaPlaneSweepWithdDefaultConfigration(const float minZ,
+                                             const float maxZ) {
+
+  PSL::CudaPlaneSweep cPS;
+  // Scale the images down to 0.25 times the original side length
+  cPS.setScale(0.25);
+  cPS.setZRange(minZ, maxZ);
+  cPS.setMatchWindowSize(7, 7);
+  cPS.setNumPlanes(256);
+  cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_NONE);
+  cPS.setPlaneGenerationMode(PSL::PLANE_SWEEP_PLANEMODE_UNIFORM_DISPARITY);
+  cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
+  cPS.setSubPixelInterpolationMode(PSL::PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE);
+  cPS.enableOutputBestDepth();
+  cPS.enableColorMatching(false);
+  cPS.enableOutputBestCosts(false);
+  cPS.enableOuputUniquenessRatio(false);
+  cPS.enableOutputCostVolume(false);
+  cPS.enableSubPixel();
+
+  return cPS;
+}
+
+int UploadImageToDevice(const std::vector<std::string> &image_file_paths,
+                        const int image_num_to_upload,
+                        std::map<int, PSL::CameraMatrix<double>> &cameras,
+                        PSL::CudaPlaneSweep &cps) {
+  // now we upload the images
+  int ref_img_id_in_cps = -1;
+  int ref_idx = image_num_to_upload / 2;
+  for (int img_idx = 0; img_idx < image_num_to_upload; img_idx++) {
+    // load the image from disk
+    std::string imageFileName = image_file_paths[img_idx];
+    cv::Mat image = cv::imread(imageFileName);
+    CHECK(!image.empty()) << "Failed to load image";
+    CHECK(cameras.count(img_idx) == 1) << "Camera for image was not loaded, "
+                                          "something is wrong with the dataset";
+
+    int img_id_in_cps = cps.addImage(image, cameras[img_idx]);
+    if (img_idx == ref_idx) {
+      ref_img_id_in_cps = img_id_in_cps;
+    }
+  }
+  return ref_img_id_in_cps;
+}
 }
 
 int main(int argc, char *argv[]) {
@@ -58,279 +240,119 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  std::string kMatrixFile = dataFolder + "/K.txt";
+  // Load camera matrix from file.
+  Eigen::Matrix3d K = LoadKMatrixFromFile(dataFolder + "/K.txt");
 
-  // try to load k matrix
-  std::ifstream kMatrixStr;
-  kMatrixStr.open(kMatrixFile.c_str());
+  // Load camera poses from files.
+  std::map<int, PSL::CameraMatrix<double>> cameras =
+      LoadCameraMatrixFromFile(dataFolder + "/model-0-cams.txt", K);
 
-  if (!kMatrixStr.is_open()) {
-    PSL_THROW_EXCEPTION("Error opening K matrix file.")
-  }
+  // Load image filenames.
+  std::vector<std::string> imageFileNames, image_file_paths;
+  LoadImageFilePaths(dataFolder + "/images.txt", dataFolder, imageFileNames,
+                     image_file_paths);
 
-  Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
-  kMatrixStr >> K(0, 0);
-  kMatrixStr >> K(0, 1);
-  kMatrixStr >> K(0, 2);
-  kMatrixStr >> K(1, 1);
-  kMatrixStr >> K(1, 2);
+  // Compute average distance.
+  float minZ, maxZ;
+  CalculateMinMaxRange(imageFileNames.size(), cameras, minZ, maxZ);
 
-  // Load the poses file
-  // Poses are computed with Christopher Zach's publicly available V3D Software
+  //
+  MakeOutputFolder("pinholeTestResults");
 
-  std::string v3dcameraFile = dataFolder + "/model-0-cams.txt";
-
-  std::ifstream posesStr;
-  posesStr.open(v3dcameraFile.c_str());
-
-  if (!posesStr.is_open()) {
-    PSL_THROW_EXCEPTION("Could not load camera poses");
-  }
-
-  int numCameras;
-  posesStr >> numCameras;
-
-  std::map<int, PSL::CameraMatrix<double>> cameras;
-
-  for (int c = 0; c < numCameras; c++) {
-    int id;
-    posesStr >> id;
-
-    Eigen::Matrix<double, 3, 3> R;
-    Eigen::Matrix<double, 3, 1> T;
-
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++)
-        posesStr >> R(i, j);
-
-      posesStr >> T(i);
-    }
-
-    cameras[id].setKRT(K, R, T);
-  }
-
-  // now load the image filenames
-
-  std::string imageListFile = dataFolder + "/images.txt";
-
-  std::ifstream imagesStream;
-  imagesStream.open(imageListFile.c_str());
-
-  if (!imagesStream.is_open()) {
-    PSL_THROW_EXCEPTION("Could not load images list file")
-  }
-
-  std::vector<std::string> imageFileNames;
-  {
-    std::string imageFileName;
-    while (imagesStream >> imageFileName) {
-      imageFileNames.push_back(imageFileName);
-    }
-  }
-
-  if (imageFileNames.size() != 25) {
-    PSL_THROW_EXCEPTION("The dataset does not contain 25 images")
-  }
-
-  // Each of the datasets contains 25 cameras taken in 5 rows
-  // The reconstructions are not metric. In order to have an idea about the
-  // scale
-  // everything is defined with respect to the average distance between the
-  // cameras.
-
-  double avgDistance = 0;
-  int numDistances = 0;
-
-  for (unsigned int i = 0; i < imageFileNames.size() - 1; i++) {
-    if (cameras.count(i) == 1) {
-      for (unsigned int j = i + 1; j < imageFileNames.size(); j++) {
-        if (cameras.count(j) == 1) {
-          Eigen::Vector3d distance = cameras[i].getC() - cameras[j].getC();
-
-          avgDistance += distance.norm();
-          numDistances++;
-        }
-      }
-    }
-  }
-
-  if (numDistances < 2) {
-    PSL_THROW_EXCEPTION(
-        "Could not compute average distance, less than two cameras found");
-  }
-
-  avgDistance /= numDistances;
-  std::cout << "Cameras have an average distance of " << avgDistance << "."
-            << std::endl;
-
-  float minZ = (float)(2.5f * avgDistance);
-  float maxZ = (float)(100.0f * avgDistance);
-  std::cout << "  Z range :  " << minZ << "  - " << maxZ << std::endl;
-  makeOutputFolder("pinholeTestResults");
-
+#if 0
   // First tests compute a depth map for the middle image of the first row
   {
-    makeOutputFolder("pinholeTestResults/colorSAD");
+    MakeOutputFolder("pinholeTestResults/colorSAD");
+    PSL::CudaPlaneSweep cPS =
+        CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
+    cPS.enableColorMatching(true);
 
-    PSL::CudaPlaneSweep cPS;
-    cPS.setScale(
-        0.25); // Scale the images down to 0.25 times the original side length
-    cPS.setZRange(minZ, maxZ);
-    cPS.setMatchWindowSize(7, 7);
-    cPS.setNumPlanes(256);
-    cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_NONE);
-    cPS.setPlaneGenerationMode(PSL::PLANE_SWEEP_PLANEMODE_UNIFORM_DISPARITY);
-    cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-    cPS.setSubPixelInterpolationMode(PSL::PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE);
-    cPS.enableOutputBestDepth();
-    cPS.enableColorMatching();
-    cPS.enableOutputBestCosts(false);
-    cPS.enableOuputUniquenessRatio(false);
-    cPS.enableOutputCostVolume(false);
-    cPS.enableSubPixel();
 
-    // now we upload the images
-    int refId = -1;
-    for (int i = 0; i < 5; i++) {
-      // load the image from disk
-      std::string imageFileName = dataFolder + "/" + imageFileNames[i];
-      cv::Mat image = cv::imread(imageFileName);
-      if (image.empty()) {
-        PSL_THROW_EXCEPTION("Failed to load image")
+    {
+      int refId = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+
+      {
+        cPS.process(refId);
+        PSL::DepthMap<float, double> dM;
+        dM = cPS.getBestDepth();
+        cv::Mat refImage = cPS.downloadImage(refId);
+
+        MakeOutputFolder("pinholeTestResults/colorSAD/NoOcclusionHandling/");
+        cv::imwrite(
+            "pinholeTestResults/colorSAD/NoOcclusionHandling/refImg.png",
+            refImage);
+        dM.saveInvDepthAsColorImage(
+            "pinholeTestResults/colorSAD/NoOcclusionHandling/invDepthCol.png",
+            minZ, maxZ);
+
+        cv::imshow("Reference Image", refImage);
+        dM.displayInvDepthColored(minZ, maxZ, 100);
       }
 
-      if (cameras.count(i) != 1) {
-        PSL_THROW_EXCEPTION("Camera for image was not loaded, something is "
-                            "wrong with the dataset")
-      }
+      {
+        cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
+        cPS.process(refId);
+        PSL::DepthMap<float, double> dM;
+        dM = cPS.getBestDepth();
+        cv::Mat refImage = cPS.downloadImage(refId);
 
-      int id = cPS.addImage(image, cameras[i]);
-      if (i == 2) {
-        refId = id;
+        MakeOutputFolder("pinholeTestResults/colorSAD/RefSplit/");
+        cv::imwrite("pinholeTestResults/colorSAD/RefSplit/refImg.png",
+                    refImage);
+        dM.saveInvDepthAsColorImage(
+            "pinholeTestResults/colorSAD/RefSplit/invDepthCol.png", minZ, maxZ);
+
+        cv::imshow("Reference Image", refImage);
+        dM.displayInvDepthColored(minZ, maxZ, 100);
       }
     }
 
     {
-      cPS.process(refId);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      // now we add the remaining images and use best K occlusion handling
+      int refId = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
 
-      makeOutputFolder("pinholeTestResults/colorSAD/NoOcclusionHandling/");
-      cv::imwrite("pinholeTestResults/colorSAD/NoOcclusionHandling/refImg.png",
-                  refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/colorSAD/NoOcclusionHandling/invDepthCol.png",
-          minZ, maxZ);
+      {
+        cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
+        cPS.setOcclusionBestK(5);
+        cPS.process(refId);
+        PSL::DepthMap<float, double> dM;
+        dM = cPS.getBestDepth();
+        cv::Mat refImage = cPS.downloadImage(refId);
 
-      cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
-    }
+        MakeOutputFolder("pinholeTestResults/colorSAD/BestK/");
+        cv::imwrite("pinholeTestResults/colorSAD/BestK/refImg.png", refImage);
+        dM.saveInvDepthAsColorImage(
+            "pinholeTestResults/colorSAD/BestK/invDepthCol.png", minZ, maxZ);
 
-    {
-      cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
-      cPS.process(refId);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
-
-      makeOutputFolder("pinholeTestResults/colorSAD/RefSplit/");
-      cv::imwrite("pinholeTestResults/colorSAD/RefSplit/refImg.png", refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/colorSAD/RefSplit/invDepthCol.png", minZ, maxZ);
-
-      cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
-    }
-
-    // now we add the remaining images and use best K occlusion handling
-    for (int i = 5; i < 25; i++) {
-      // load the image from disk
-      std::string imageFileName = dataFolder + "/" + imageFileNames[i];
-      cv::Mat image = cv::imread(imageFileName);
-      if (image.empty()) {
-        PSL_THROW_EXCEPTION("Failed to load image")
+        cv::imshow("Reference Image", refImage);
+        dM.displayInvDepthColored(minZ, maxZ, 100);
       }
-
-      if (cameras.count(i) != 1) {
-        PSL_THROW_EXCEPTION("Camera for image was not loaded, something is "
-                            "wrong with the dataset")
-      }
-
-      int id = cPS.addImage(image, cameras[i]);
-      if (i == 12) {
-        refId = id;
-      }
-    }
-
-    {
-      cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
-      cPS.setOcclusionBestK(5);
-      cPS.process(refId);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
-
-      makeOutputFolder("pinholeTestResults/colorSAD/BestK/");
-      cv::imwrite("pinholeTestResults/colorSAD/BestK/refImg.png", refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/colorSAD/BestK/invDepthCol.png", minZ, maxZ);
-
-      cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
     }
   }
 
+#else
   // First tests compute a depth map for the middle image of the first row
   {
-    makeOutputFolder("pinholeTestResults/grayscaleSAD");
-    makeOutputFolder("pinholeTestResults/grayscaleZNCC");
 
-    PSL::CudaPlaneSweep cPS;
-    cPS.setScale(
-        0.25); // Scale the images down to 0.25 times the original side length
-    cPS.setZRange(minZ, maxZ);
-    cPS.setMatchWindowSize(7, 7);
-    cPS.setNumPlanes(256);
-    cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_NONE);
-    cPS.setPlaneGenerationMode(PSL::PLANE_SWEEP_PLANEMODE_UNIFORM_DISPARITY);
-    cPS.setSubPixelInterpolationMode(PSL::PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE);
-    cPS.enableOutputBestDepth();
-    cPS.enableColorMatching(false);
-    cPS.enableOutputBestCosts(false);
-    cPS.enableOuputUniquenessRatio(false);
-    cPS.enableOutputCostVolume(false);
-    cPS.enableSubPixel();
+    PSL::CudaPlaneSweep cPS =
+        CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
 
-    // now we upload the images
-    int refId = -1;
-    for (int i = 0; i < 5; i++) {
-      // load the image from disk
-      std::string imageFileName = dataFolder + "/" + imageFileNames[i];
-      cv::Mat image = cv::imread(imageFileName);
-      if (image.empty()) {
-        PSL_THROW_EXCEPTION("Failed to load image")
-      }
+#if 0
 
-      if (cameras.count(i) != 1) {
-        PSL_THROW_EXCEPTION("Camera for image was not loaded, something is "
-                            "wrong with the dataset")
-      }
+    MakeOutputFolder("pinholeTestResults/grayscaleSAD");
+    MakeOutputFolder("pinholeTestResults/grayscaleZNCC");
 
-      int id = cPS.addImage(image, cameras[i]);
-      if (i == 2) {
-        refId = id;
-      }
-    }
+
+    int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
 
     {
       cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-      cPS.process(refId);
+      cPS.process(ref_img_id);
       PSL::DepthMap<float, double> dM;
       dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-      makeOutputFolder("pinholeTestResults/grayscaleSAD/NoOcclusionHandling/");
+      MakeOutputFolder("pinholeTestResults/grayscaleSAD/NoOcclusionHandling/");
       cv::imwrite(
           "pinholeTestResults/grayscaleSAD/NoOcclusionHandling/refImg.png",
           refImage);
@@ -338,18 +360,21 @@ int main(int argc, char *argv[]) {
           "pinholeTestResults/grayscaleSAD/NoOcclusionHandling/invDepthCol.png",
           minZ, maxZ);
 
+      cv::Mat inv_depth_mat;
+      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
       cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
+      cv::imshow("Depth Map by PLANE_SWEEP_SAD", inv_depth_mat);
+      cv::waitKey(1000);
     }
 
     {
       cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
-      cPS.process(refId);
+      cPS.process(ref_img_id);
       PSL::DepthMap<float, double> dM;
       dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-      makeOutputFolder("pinholeTestResults/grayscaleZNCC/NoOcclusionHandling/");
+      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/NoOcclusionHandling/");
       cv::imwrite(
           "pinholeTestResults/grayscaleZNCC/NoOcclusionHandling/refImg.png",
           refImage);
@@ -357,103 +382,108 @@ int main(int argc, char *argv[]) {
                                   "NoOcclusionHandling/invDepthCol.png",
                                   minZ, maxZ);
 
+      cv::Mat inv_depth_mat;
+      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
       cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
+      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
+      cv::waitKey(1000);
     }
 
-    cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
-
     {
+      cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
       cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-      cPS.process(refId);
+      cPS.process(ref_img_id);
       PSL::DepthMap<float, double> dM;
       dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-      makeOutputFolder("pinholeTestResults/grayscaleSAD/RefSplit/");
+      MakeOutputFolder("pinholeTestResults/grayscaleSAD/RefSplit/");
       cv::imwrite("pinholeTestResults/grayscaleSAD/RefSplit/refImg.png",
                   refImage);
       dM.saveInvDepthAsColorImage(
           "pinholeTestResults/grayscaleSAD/RefSplit/invDepthCol.png", minZ,
           maxZ);
 
+      cv::Mat inv_depth_mat;
+      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
       cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
+      cv::imshow("Depth Map by PLANE_SWEEP_OCCLUSION_REF_SPLIT", inv_depth_mat);
+      cv::waitKey(1000);
     }
 
     {
       cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
-      cPS.process(refId);
+      cPS.process(ref_img_id);
       PSL::DepthMap<float, double> dM;
       dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-      makeOutputFolder("pinholeTestResults/grayscaleZNCC/RefSplit/");
+      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/RefSplit/");
       cv::imwrite("pinholeTestResults/grayscaleZNCC/RefSplit/refImg.png",
                   refImage);
       dM.saveInvDepthAsColorImage(
           "pinholeTestResults/grayscaleZNCC/RefSplit/invDepthCol.png", minZ,
           maxZ);
 
+      cv::Mat inv_depth_mat;
+      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
       cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
+      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
+      cv::waitKey(1000);
     }
 
-    // now we add the remaining images and use best K occlusion handling
-    for (int i = 5; i < 25; i++) {
-      // load the image from disk
-      std::string imageFileName = dataFolder + "/" + imageFileNames[i];
-      cv::Mat image = cv::imread(imageFileName);
-      if (image.empty()) {
-        PSL_THROW_EXCEPTION("Failed to load image")
-      }
+#endif
 
-      if (cameras.count(i) != 1) {
-        PSL_THROW_EXCEPTION("Camera for image was not loaded, something is "
-                            "wrong with the dataset")
-      }
+    int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
 
-      int id = cPS.addImage(image, cameras[i]);
-      if (i == 12) {
-        refId = id;
-      }
-    }
+    /*
 
-    cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
+        {
+          cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
+          cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
+          cPS.setOcclusionBestK(5);
+          cPS.process(ref_img_id);
+          PSL::DepthMap<float, double> dM;
+          dM = cPS.getBestDepth();
+          cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-    {
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-      cPS.setOcclusionBestK(5);
-      cPS.process(refId);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+          MakeOutputFolder("pinholeTestResults/grayscaleSAD/BestK/");
+          cv::imwrite("pinholeTestResults/grayscaleSAD/BestK/refImg.png",
+       refImage);
+          dM.saveInvDepthAsColorImage(
+              "pinholeTestResults/grayscaleSAD/BestK/invDepthCol.png", minZ,
+       maxZ);
 
-      makeOutputFolder("pinholeTestResults/grayscaleSAD/BestK/");
-      cv::imwrite("pinholeTestResults/grayscaleSAD/BestK/refImg.png", refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/grayscaleSAD/BestK/invDepthCol.png", minZ, maxZ);
+          cv::Mat inv_depth_mat;
+          dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
+          cv::imshow("Reference Image", refImage);
+          cv::imshow("Depth Map by PLANE_SWEEP_OCCLUSION_BEST_K",
+       inv_depth_mat);
+          cv::waitKey(1000);
+        }
 
-      cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
-    }
+    */
 
     {
       cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
       cPS.setOcclusionBestK(5);
-      cPS.process(refId);
+      cPS.process(ref_img_id);
       PSL::DepthMap<float, double> dM;
       dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(refId);
+      cv::Mat refImage = cPS.downloadImage(ref_img_id);
 
-      makeOutputFolder("pinholeTestResults/grayscaleZNCC/BestK/");
+      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/BestK/");
       cv::imwrite("pinholeTestResults/grayscaleZNCC/BestK/refImg.png",
                   refImage);
       dM.saveInvDepthAsColorImage(
           "pinholeTestResults/grayscaleZNCC/BestK/invDepthCol.png", minZ, maxZ);
 
+      cv::Mat inv_depth_mat;
+      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
       cv::imshow("Reference Image", refImage);
-      dM.displayInvDepthColored(minZ, maxZ, 100);
+      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
+      cv::waitKey(1000);
     }
   }
+#endif
 }

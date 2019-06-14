@@ -83,8 +83,7 @@ void DepthMap<T, U>::display(T minZ, T maxZ, int displayTime,
 }
 
 template <typename T, typename U>
-void DepthMap<T, U>::displayInvDepth(T minZ, T maxZ, int displayTime,
-                                     const char *windowName) {
+void DepthMap<T, U>::ComputeDepthMat(T minZ, T maxZ, cv::Mat &depth_inv_mat) {
   cv::Mat_<T> depthsMat(height, width, getDataPtr());
   cv::Mat_<T> invDepthsMat(height, width);
   for (unsigned int y = 0; y < height; y++) {
@@ -98,7 +97,15 @@ void DepthMap<T, U>::displayInvDepth(T minZ, T maxZ, int displayTime,
       }
     }
   }
-  cv::imshow(windowName, invDepthsMat);
+  depth_inv_mat = invDepthsMat;
+}
+
+template <typename T, typename U>
+void DepthMap<T, U>::displayInvDepth(T minZ, T maxZ, int displayTime,
+                                     const char *windowName) {
+  cv::Mat inv_depth_mat;
+  ComputeDepthMat(minZ, maxZ, inv_depth_mat);
+  cv::imshow(windowName, inv_depth_mat);
   cv::waitKey(displayTime);
 }
 
