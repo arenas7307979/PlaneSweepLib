@@ -1,3 +1,9 @@
 build/*
 testResults/*
 CMakeLists.txt.user
+*TestResults/*
+.vscode/ipch/*
+core
+GPATH
+GRTAGS
+GTAGS

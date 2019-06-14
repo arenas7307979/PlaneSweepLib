@@ -16,96 +16,93 @@
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "cudaFishEyeImageProcessor.h"
-#include <psl_base/common.h>
 #include <cmath>
+#include <psl_base/common.h>
 
 using namespace PSL_CUDA;
 using namespace PSL;
 
-CudaFishEyeImageProcessor::CudaFishEyeImageProcessor()
-{
-    CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorInitTexturing();
+CudaFishEyeImageProcessor::CudaFishEyeImageProcessor() {
+  CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorInitTexturing();
 }
 
-void CudaFishEyeImageProcessor::setInputImg(DeviceImage& inputImg, FishEyeCameraMatrix<double>& camera)
-{
-    this->inputImg = inputImg;
-    this->camera = camera;
-    if (camera.getK()(0,1) != 0)
-    {
-        PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
-    }
+void CudaFishEyeImageProcessor::setInputImg(
+    DeviceImage &inputImg, FishEyeCameraMatrix<double> &camera) {
+  this->inputImg = inputImg;
+  this->camera = camera;
+  if (camera.getK()(0, 1) != 0) {
+    PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
+  }
 }
 
-std::pair<DeviceImage, PSL::FishEyeCameraMatrix<double> > CudaFishEyeImageProcessor::undistort(double iScale, double fScale, double k1, double k2, double p1, double p2)
-{
-    if (inputImg.getNumChannels() != 1)
-    {
-        PSL_THROW_EXCEPTION("Only grayscale supported.")
-    }
+std::pair<DeviceImage, PSL::FishEyeCameraMatrix<double>>
+CudaFishEyeImageProcessor::undistort(double iScale, double fScale, double k1,
+                                     double k2, double p1, double p2) {
+  if (inputImg.getNumChannels() != 1) {
+    PSL_THROW_EXCEPTION("Only grayscale supported.")
+  }
 
-    DeviceImage outputImage;
-    int width = (int) round(iScale*inputImg.getWidth());
-    int height = (int) round(iScale*inputImg.getHeight());
+  DeviceImage outputImage;
+  int width = (int)round(iScale * inputImg.getWidth());
+  int height = (int)round(iScale * inputImg.getHeight());
 
-    outputImage.allocatePitched(width, height, 1);
+  outputImage.allocatePitched(width, height, 1);
 
-    Eigen::Matrix3d Knew = camera.getK();
-    Knew /= Knew(2,2); // make sure it is normalized
-    Knew(0,0) *= iScale*fScale;
-    Knew(1,1) *= iScale*fScale;
-    Knew(0,2) = (Knew(0,2) + 0.5)*iScale - 0.5;
-    Knew(1,2) = (Knew(1,2) + 0.5)*iScale -0.5;
+  Eigen::Matrix3d Knew = camera.getK();
+  Knew /= Knew(2, 2); // make sure it is normalized
+  Knew(0, 0) *= iScale * fScale;
+  Knew(1, 1) *= iScale * fScale;
+  Knew(0, 2) = (Knew(0, 2) + 0.5) * iScale - 0.5;
+  Knew(1, 2) = (Knew(1, 2) + 0.5) * iScale - 0.5;
 
+  if (Knew(0, 1) != 0) {
+    PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
+  }
 
-    if (Knew(0,1) != 0)
-    {
-        PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
-    }
+  Eigen::Matrix3d K = camera.getK();
+  K /= K(2, 2);
 
-    Eigen::Matrix3d K = camera.getK();
-    K /= K(2,2);
+  Eigen::Matrix3d KnewInv = Knew.inverse();
 
-    Eigen::Matrix3d KnewInv = Knew.inverse();
+  FishEyeCameraMatrix<double> newCamera(Knew, camera.getR(), camera.getT(),
+                                        camera.getXi());
 
+  CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorUndistort(
+      inputImg, outputImage, k1, k2, p1, p2, K(0, 0), K(0, 2), K(1, 1), K(1, 2),
+      KnewInv(0, 0), KnewInv(0, 2), KnewInv(1, 1), KnewInv(1, 2));
 
-    FishEyeCameraMatrix<double> newCamera(Knew, camera.getR(), camera.getT(), camera.getXi());
-
-
-    CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorUndistort(inputImg, outputImage, k1, k2, p1, p2,
-                                                                        K(0,0), K(0,2), K(1,1), K(1,2), KnewInv(0,0), KnewInv(0,2), KnewInv(1,1), KnewInv(1,2));
-
-    return std::make_pair<DeviceImage, FishEyeCameraMatrix<double> >(outputImage, newCamera);
+  return std::make_pair(outputImage, newCamera);
 }
 
-DeviceImage CudaFishEyeImageProcessor::extractPinhole(double iScale, Eigen::Matrix3d& KPinhole, double k1, double k2, double p1, double p2)
-{
-    if (inputImg.getNumChannels() != 1)
-    {
-        PSL_THROW_EXCEPTION("Only grayscale supported.")
-    }
+DeviceImage CudaFishEyeImageProcessor::extractPinhole(double iScale,
+                                                      Eigen::Matrix3d &KPinhole,
+                                                      double k1, double k2,
+                                                      double p1, double p2) {
+  if (inputImg.getNumChannels() != 1) {
+    PSL_THROW_EXCEPTION("Only grayscale supported.")
+  }
 
-    DeviceImage outputImage;
-    int width = (int) round(iScale*inputImg.getWidth());
-    int height = (int) round(iScale*inputImg.getHeight());
+  DeviceImage outputImage;
+  int width = (int)round(iScale * inputImg.getWidth());
+  int height = (int)round(iScale * inputImg.getHeight());
 
-    outputImage.allocatePitched(width, height, 1);
+  outputImage.allocatePitched(width, height, 1);
 
-    KPinhole /= KPinhole(2,2);
+  KPinhole /= KPinhole(2, 2);
 
-    if (KPinhole(0,1) != 0)
-    {
-        PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
-    }
+  if (KPinhole(0, 1) != 0) {
+    PSL_THROW_EXCEPTION("Only Ks without skew allowed.")
+  }
 
-    Eigen::Matrix3d KInvPinhole = KPinhole.inverse();
+  Eigen::Matrix3d KInvPinhole = KPinhole.inverse();
 
-    Eigen::Matrix3d K = camera.getK();
-    K /= K(2,2);
+  Eigen::Matrix3d K = camera.getK();
+  K /= K(2, 2);
 
-    CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorUndistortRectify(inputImg, outputImage, camera.getXi(), k1, k2, p1, p2,
-                                                                               K(0,0), K(0,2), K(1,1), K(1,2), KInvPinhole(0,0), KInvPinhole(0,2), KInvPinhole(1,1), KInvPinhole(1,2));
+  CudaFishEyeImageProcessorDeviceCode::fishEyeImageProcessorUndistortRectify(
+      inputImg, outputImage, camera.getXi(), k1, k2, p1, p2, K(0, 0), K(0, 2),
+      K(1, 1), K(1, 2), KInvPinhole(0, 0), KInvPinhole(0, 2), KInvPinhole(1, 1),
+      KInvPinhole(1, 2));
 
-    return outputImage;
+  return outputImage;
 }
-
