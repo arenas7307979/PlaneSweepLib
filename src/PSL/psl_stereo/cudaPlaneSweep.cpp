@@ -15,20 +15,25 @@
 // You should have received a copy of the GNU General Public License
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
+// Self Header
 #include "cudaPlaneSweep.h"
 
+// System
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
 
+// Glog
+#include <glog/logging.h>
+
+// OpenCV
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
+// PSL
 #include <psl_base/exception.h>
-
 #include <psl_cudaBase/cudaCommon.h>
-
 #include <psl_cudaBase/deviceImage.h>
 
 using std::cerr;
@@ -213,25 +218,15 @@ double CudaPlaneSweep::largestBaseline(const CudaPlaneSweepImage &refImg) {
   return lBaseline;
 }
 
-void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
+void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
   int numPlanes = planes.getWidth();
-  // this->planes = planes;
-
-  // check if values are set
-  if (!(matchWindowHeight > 0 && matchWindowWidth > 0 && numPlanes > 0)) {
-    PSL_THROW_EXCEPTION("Parameters not set properly")
-  }
+  CHECK(matchWindowHeight > 0 && matchWindowWidth > 0 && numPlanes > 0)
+      << "Parameters are not set properly";
 
   CudaPlaneSweepImage refImg;
-
-  if (images.count(refImgId) == 1) {
-    refImg = images[refImgId];
-  } else {
-    stringstream strstream;
-    strstream << "Image with ID " << refImgId << " does not exist.";
-    PSL_THROW_EXCEPTION(strstream.str().c_str());
-  }
-
+  CHECK(images.count(ref_img_idx) == 1) << "Image with ID " << ref_img_idx
+                                        << " does not exist.";
+  refImg = images[ref_img_idx];
   refImgCam = refImg.cam;
 
   if (outputCostVolumeEnabled) {
@@ -320,17 +315,15 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
     int numAfter = 0;
     for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
          it != images.end(); it++) {
-      if (it->first < refImgId) {
+      if (it->first < ref_img_idx) {
         numBefore++;
-      } else if (it->first > refImgId) {
+      } else if (it->first > ref_img_idx) {
         numAfter++;
       }
     }
-
-    if (numBefore == 0 || numAfter == 0) {
-      PSL_THROW_EXCEPTION("Reference Image cannot be at the border of the "
-                          "sequence with PLANE_SWEEP_OCCLUSION_REF_SPLIT")
-    }
+    CHECK(!(numBefore == 0 || numAfter == 0))
+        << "Reference Image cannot be at the border of the sequence with "
+           "PLANE_SWEEP_OCCLUSION_REF_SPLIT";
 
     accumScale0 = (double)1 / (double)numBefore;
     accumScale1 = (double)1 / (double)numAfter;
@@ -362,6 +355,7 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
                                         matchWindowRadiusX, matchWindowRadiusY);
   }
 
+  // Loop for plane.
   for (int i = 0; i < numPlanes; i++) {
 
     if (occlusionMode == PLANE_SWEEP_OCCLUSION_NONE) {
@@ -374,14 +368,16 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
     int j = 0;
     for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
          it != images.end(); it++) {
-      if (it->first == refImgId)
+      if (it->first == ref_img_idx) {
         continue;
+      }
 
       // match the image
       switch (occlusionMode) {
       case PLANE_SWEEP_OCCLUSION_NONE: {
         float H[9];
-        planeHomography(planes(i, 0), refImg.cam, it->second.cam, H);
+        ComputeHomographyFromReferenceImage(planes(i, 0), refImg.cam,
+                                            it->second.cam, H);
 
         switch (matchingCosts) {
         case PLANE_SWEEP_SAD:
@@ -411,11 +407,12 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
       }
       case PLANE_SWEEP_OCCLUSION_REF_SPLIT: {
         float H[9];
-        planeHomography(planes(i, 0), refImg.cam, it->second.cam, H);
+        ComputeHomographyFromReferenceImage(planes(i, 0), refImg.cam,
+                                            it->second.cam, H);
 
         switch (matchingCosts) {
         case PLANE_SWEEP_SAD:
-          if (it->first < refImgId) {
+          if (it->first < ref_img_idx) {
             planeSweepWarpADAccum(it->second.devImg, colorMatchingEnabled, H,
                                   refImg.devImg, (float)accumScale0,
                                   costAccumBeforeBuffer);
@@ -426,7 +423,7 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
           }
           break;
         case PLANE_SWEEP_ZNCC:
-          if (it->first < refImgId) {
+          if (it->first < ref_img_idx) {
             planeSweepWarpZNCCAccum(
                 it->second.devImg, H, refImg.devImg, refImgBoxFilterBuffer,
                 refImgSqrBoxFilterBuffer, (float)accumScale0,
@@ -612,24 +609,17 @@ void CudaPlaneSweep::process(int refImgId, Grid<Vector4d> &planes) {
   }
 }
 
-void CudaPlaneSweep::process(int refImgId) {
+void CudaPlaneSweep::process(int ref_img_idx) {
   // check if values are set
-  if (!(nearZ > 0 && farZ > 0 && numPlanes > 0)) {
-    PSL_THROW_EXCEPTION("Parameters not set properly")
-  }
+  CHECK(nearZ > 0 && farZ > 0 && numPlanes > 0)
+      << "Parameters not set properly";
+  CHECK(images.count(ref_img_idx) == 1) << "Image with ID " << ref_img_idx
+                                        << " does not exist.";
 
   CudaPlaneSweepImage refImg;
-
-  if (images.count(refImgId) == 1) {
-    refImg = images[refImgId];
-  } else {
-    stringstream strstream;
-    strstream << "Image with ID " << refImgId << " does not exist.";
-    PSL_THROW_EXCEPTION(strstream.str().c_str());
-  }
+  refImg = images[ref_img_idx];
 
   planes = Grid<Vector4d>(numPlanes, 1);
-
   switch (planeGenerationMode) {
   case PLANE_SWEEP_PLANEMODE_UNIFORM_DEPTH: {
     double step = (farZ - nearZ) / (numPlanes - 1);
@@ -642,31 +632,32 @@ void CudaPlaneSweep::process(int refImgId) {
     break;
   }
   case PLANE_SWEEP_PLANEMODE_UNIFORM_DISPARITY: {
-    double maxB = largestBaseline(refImg);
+    double baseline = largestBaseline(refImg);
+    double focal = (refImg.cam.getK()(0, 0) + refImg.cam.getK()(1, 1)) / 2.0;
 
-    double avgF = (refImg.cam.getK()(0, 0) + refImg.cam.getK()(1, 1)) / 2.0;
+    // Disp = Baseline * focal / Z
+    double min_disp = baseline * focal / farZ;
+    double max_disp = baseline * focal / nearZ;
 
-    double minD = maxB * avgF / farZ;
-    double maxD = maxB * avgF / nearZ;
+    // Disp step.
+    double disp_step = (max_disp - min_disp) / (numPlanes - 1);
 
-    double dStep = (maxD - minD) / (numPlanes - 1);
-
+    // Plane is perpendicular to z axis.
     for (int i = 0; i < numPlanes; i++) {
       planes(i, 0).setZero();
       planes(i, 0)(2) = -1;
-      planes(i, 0)(3) = maxB * avgF / (maxD - i * dStep);
+      planes(i, 0)(3) = baseline * focal / (max_disp - i * disp_step);
     }
     break;
   }
   }
 
-  process(refImgId, planes);
+  process(ref_img_idx, planes);
 }
 
-void CudaPlaneSweep::planeHomography(const Matrix<double, 4, 1> &plane,
-                                     const CameraMatrix<double> &refCam,
-                                     const CameraMatrix<double> &otherCam,
-                                     float *H) {
+void CudaPlaneSweep::ComputeHomographyFromReferenceImage(
+    const Matrix<double, 4, 1> &plane, const CameraMatrix<double> &refCam,
+    const CameraMatrix<double> &otherCam, float *H) {
   const Matrix<double, 3, 3> kRef = refCam.getK();
   const Matrix<double, 3, 3> kOther = otherCam.getK();
   const Matrix<double, 3, 3> rRef = refCam.getR();
@@ -734,7 +725,7 @@ void CudaPlaneSweep::matchImage(const CudaPlaneSweepImage &refImg,
                                 const Matrix<double, 4, 1> &plane,
                                 DeviceBuffer<float> &costBuffer) {
   float H[9];
-  planeHomography(plane, refImg.cam, otherImg.cam, H);
+  ComputeHomographyFromReferenceImage(plane, refImg.cam, otherImg.cam, H);
 
   switch (matchingCosts) {
   case PLANE_SWEEP_SAD:

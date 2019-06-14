@@ -45,9 +45,9 @@ __forceinline__ __device__ float computeWarpedGrayscaleTexturePixel(
     float h21, float h22, float h23, float h31, float h32, float h33);
 
 texture<uchar4, 2, cudaReadModeNormalizedFloat> planeSweepColorTexture;
-texture<uchar1, 2, cudaReadModeNormalizedFloat> planeSweepGrayscaleTexture;
-texture<unsigned char, 2> planeSweepGrayscaleTextureNonInterp;
-texture<float, 2> planeSweepCostTexture;
+texture<uchar1, 2, cudaReadModeNormalizedFloat> g_gray_scale_texture;
+texture<unsigned char, 2> g_gray_scale_texture_wo_interpolation;
+texture<float, 2> g_cost_texture;
 
 cudaChannelFormatDesc planeSweepColorChannelDesc;
 cudaChannelFormatDesc planeSweepGrayscaleChannelDesc;
@@ -74,24 +74,24 @@ void planeSweepInitTexturing() {
     planeSweepColorTexture.filterMode = cudaFilterModeLinear;
     planeSweepColorTexture.normalized = true;
 
-    planeSweepGrayscaleTexture.addressMode[0] = cudaAddressModeWrap;
-    planeSweepGrayscaleTexture.addressMode[1] = cudaAddressModeWrap;
-    planeSweepGrayscaleTexture.filterMode = cudaFilterModeLinear;
-    planeSweepGrayscaleTexture.normalized = true;
+    g_gray_scale_texture.addressMode[0] = cudaAddressModeWrap;
+    g_gray_scale_texture.addressMode[1] = cudaAddressModeWrap;
+    g_gray_scale_texture.filterMode = cudaFilterModeLinear;
+    g_gray_scale_texture.normalized = true;
 
-    planeSweepGrayscaleTextureNonInterp.addressMode[0] = cudaAddressModeWrap;
-    planeSweepGrayscaleTextureNonInterp.addressMode[1] = cudaAddressModeWrap;
-    planeSweepGrayscaleTextureNonInterp.filterMode = cudaFilterModePoint;
-    planeSweepGrayscaleTextureNonInterp.normalized = false;
+    g_gray_scale_texture_wo_interpolation.addressMode[0] = cudaAddressModeWrap;
+    g_gray_scale_texture_wo_interpolation.addressMode[1] = cudaAddressModeWrap;
+    g_gray_scale_texture_wo_interpolation.filterMode = cudaFilterModePoint;
+    g_gray_scale_texture_wo_interpolation.normalized = false;
 
     // textures for box filtering costs
     planeSweepCostChannelDesc =
         cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
 
-    planeSweepCostTexture.addressMode[0] = cudaAddressModeClamp;
-    planeSweepCostTexture.addressMode[1] = cudaAddressModeClamp;
-    planeSweepCostTexture.filterMode = cudaFilterModePoint;
-    planeSweepCostTexture.normalized = false;
+    g_cost_texture.addressMode[0] = cudaAddressModeClamp;
+    g_cost_texture.addressMode[1] = cudaAddressModeClamp;
+    g_cost_texture.filterMode = cudaFilterModePoint;
+    g_cost_texture.normalized = false;
 
     planeSweepTexturesInitialized = true;
   }
@@ -117,7 +117,7 @@ __global__ void boxFilterCostsKernel(DeviceBuffer<float> filteredBuf,
 
     int y_cost = Y - radius_y;
     for (int i = 0; i <= 2 * radius_y; i++) {
-      colSum[threadIdx.x] += tex2D(planeSweepCostTexture, x_cost, y_cost);
+      colSum[threadIdx.x] += tex2D(g_cost_texture, x_cost, y_cost);
       y_cost++;
     }
     __syncthreads();
@@ -136,9 +136,9 @@ __global__ void boxFilterCostsKernel(DeviceBuffer<float> filteredBuf,
     for (int row = 1;
          row < PLANE_SWEEP_BOX_FILTER_ROWS_PER_THREAD && (Y + row < height);
          row++) {
-      colSum[threadIdx.x] -= tex2D(planeSweepCostTexture, x_cost, y_cost);
+      colSum[threadIdx.x] -= tex2D(g_cost_texture, x_cost, y_cost);
       colSum[threadIdx.x] +=
-          tex2D(planeSweepCostTexture, x_cost, y_cost + 2 * radius_y + 1);
+          tex2D(g_cost_texture, x_cost, y_cost + 2 * radius_y + 1);
 
       y_cost++;
       __syncthreads();
@@ -161,7 +161,7 @@ void planeSweepBoxFilterCosts(DeviceBuffer<float> &costBuf,
                               int radius_x, int radius_y) {
   // Bind texture
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepCostTexture, costBuf.getAddr(),
+      cudaBindTexture2D(0, g_cost_texture, costBuf.getAddr(),
                         planeSweepCostChannelDesc, costBuf.getWidth(),
                         costBuf.getHeight(), costBuf.getPitch());)
 
@@ -180,7 +180,7 @@ void planeSweepBoxFilterCosts(DeviceBuffer<float> &costBuf,
   PSL_CUDA_CHECK_ERROR
 
   // unbind texture
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepCostTexture);)
+  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(g_cost_texture);)
 }
 
 __global__ void
@@ -209,7 +209,7 @@ planeSweepBoxFilterImageAndSqrImageKernel(DeviceBuffer<float> boxFilterBuf,
     int y_img = Y - radius_y;
     for (int i = 0; i <= 2 * radius_y; i++) {
       const float val =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       colSum[threadIdx.x] += val;
       colSum[sqrOffset + threadIdx.x] += val * val;
 
@@ -236,10 +236,10 @@ planeSweepBoxFilterImageAndSqrImageKernel(DeviceBuffer<float> boxFilterBuf,
          row < PLANE_SWEEP_BOX_FILTER_ROWS_PER_THREAD && (row + Y) < height;
          row++) {
       const float subVal =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       colSum[threadIdx.x] -= subVal;
       colSum[sqrOffset + threadIdx.x] -= subVal * subVal;
-      const float addVal = tex2D(planeSweepGrayscaleTextureNonInterp, x_img,
+      const float addVal = tex2D(g_gray_scale_texture_wo_interpolation, x_img,
                                  y_img + 2 * radius_y + 1);
       colSum[threadIdx.x] += addVal;
       colSum[sqrOffset + threadIdx.x] += addVal * addVal;
@@ -272,7 +272,7 @@ void planeSweepBoxFilterImageAndSqrImage(DeviceImage &refImg,
 
   // bind texture
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepGrayscaleTextureNonInterp,
+      cudaBindTexture2D(0, g_gray_scale_texture_wo_interpolation,
                         refImg.getAddr(), planeSweepGrayscaleChannelDesc,
                         refImg.getWidth(), refImg.getHeight(),
                         refImg.getPitch());)
@@ -289,7 +289,8 @@ void planeSweepBoxFilterImageAndSqrImage(DeviceImage &refImg,
       boxFilterBuf, boxFilterSqrBuf, radius_x, radius_y);
   PSL_CUDA_CHECK_ERROR
 
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTextureNonInterp))
+  PSL_CUDA_CHECKED_CALL(
+      cudaUnbindTexture(g_gray_scale_texture_wo_interpolation))
 }
 
 __global__ void planeSweepWarpZNCCKernel(
@@ -322,7 +323,7 @@ __global__ void planeSweepWarpZNCCKernel(
     int y_img = Y - radius_y;
     for (int i = 0; i <= 2 * radius_y; i++) {
       const float val =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       const float otherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img, width, height, h11, h12, h13, h21, h22, h23, h31, h32,
           h33);
@@ -358,14 +359,14 @@ __global__ void planeSweepWarpZNCCKernel(
          row < PLANE_SWEEP_BOX_FILTER_ROWS_PER_THREAD && (row + Y) < height;
          row++) {
       const float subVal =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       const float subOtherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img, width, height, h11, h12, h13, h21, h22, h23, h31, h32,
           h33);
       colSum[threadIdx.x] -= subOtherVal;
       colSum[sqrOffset + threadIdx.x] -= subOtherVal * subOtherVal;
       colSum[prodOffset + threadIdx.x] -= subOtherVal * subVal;
-      const float addVal = tex2D(planeSweepGrayscaleTextureNonInterp, x_img,
+      const float addVal = tex2D(g_gray_scale_texture_wo_interpolation, x_img,
                                  y_img + 2 * radius_y + 1);
       const float addOtherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img + 2 * radius_y + 1, width, height, h11, h12, h13, h21,
@@ -407,11 +408,11 @@ void planeSweepWarpZNCC(const DeviceImage &otherImg, float *homography,
                         int radius_y) {
   // bind textures
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepGrayscaleTexture, otherImg.getAddr(),
+      cudaBindTexture2D(0, g_gray_scale_texture, otherImg.getAddr(),
                         planeSweepGrayscaleChannelDesc, otherImg.getWidth(),
                         otherImg.getHeight(), otherImg.getPitch());)
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepGrayscaleTextureNonInterp,
+      cudaBindTexture2D(0, g_gray_scale_texture_wo_interpolation,
                         refImg.getAddr(), planeSweepGrayscaleChannelDesc,
                         refImg.getWidth(), refImg.getHeight(),
                         refImg.getPitch());)
@@ -438,8 +439,9 @@ void planeSweepWarpZNCC(const DeviceImage &otherImg, float *homography,
   PSL_CUDA_CHECK_ERROR
 
   // unbind textures
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTexture))
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTextureNonInterp))
+  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(g_gray_scale_texture))
+  PSL_CUDA_CHECKED_CALL(
+      cudaUnbindTexture(g_gray_scale_texture_wo_interpolation))
 }
 
 __global__ void planeSweepZNCCAccumKernel(
@@ -471,7 +473,7 @@ __global__ void planeSweepZNCCAccumKernel(
     int y_img = Y - radius_y;
     for (int i = 0; i <= 2 * radius_y; i++) {
       const float val =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       const float otherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img, width, height, h11, h12, h13, h21, h22, h23, h31, h32,
           h33);
@@ -508,14 +510,14 @@ __global__ void planeSweepZNCCAccumKernel(
          row < PLANE_SWEEP_BOX_FILTER_ROWS_PER_THREAD && (row + Y) < height;
          row++) {
       const float subVal =
-          tex2D(planeSweepGrayscaleTextureNonInterp, x_img, y_img);
+          tex2D(g_gray_scale_texture_wo_interpolation, x_img, y_img);
       const float subOtherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img, width, height, h11, h12, h13, h21, h22, h23, h31, h32,
           h33);
       colSum[threadIdx.x] -= subOtherVal;
       colSum[sqrOffset + threadIdx.x] -= subOtherVal * subOtherVal;
       colSum[prodOffset + threadIdx.x] -= subOtherVal * subVal;
-      const float addVal = tex2D(planeSweepGrayscaleTextureNonInterp, x_img,
+      const float addVal = tex2D(g_gray_scale_texture_wo_interpolation, x_img,
                                  y_img + 2 * radius_y + 1);
       const float addOtherVal = computeWarpedGrayscaleTexturePixel(
           x_img, y_img + 2 * radius_y + 1, width, height, h11, h12, h13, h21,
@@ -558,11 +560,11 @@ void planeSweepWarpZNCCAccum(const DeviceImage &otherImg, float *homography,
                              int radius_y) {
   // bind textures
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepGrayscaleTexture, otherImg.getAddr(),
+      cudaBindTexture2D(0, g_gray_scale_texture, otherImg.getAddr(),
                         planeSweepGrayscaleChannelDesc, otherImg.getWidth(),
                         otherImg.getHeight(), otherImg.getPitch());)
   PSL_CUDA_CHECKED_CALL(
-      cudaBindTexture2D(0, planeSweepGrayscaleTextureNonInterp,
+      cudaBindTexture2D(0, g_gray_scale_texture_wo_interpolation,
                         refImg.getAddr(), planeSweepGrayscaleChannelDesc,
                         refImg.getWidth(), refImg.getHeight(),
                         refImg.getPitch());)
@@ -588,8 +590,9 @@ void planeSweepWarpZNCCAccum(const DeviceImage &otherImg, float *homography,
   PSL_CUDA_CHECK_ERROR
 
   // unbind textures
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTexture))
-  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTextureNonInterp))
+  PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(g_gray_scale_texture))
+  PSL_CUDA_CHECKED_CALL(
+      cudaUnbindTexture(g_gray_scale_texture_wo_interpolation))
 }
 
 __global__ void planeSweepWarpADColorKernel(
@@ -654,7 +657,7 @@ __global__ void planeSweepWarpADGrayscaleKernel(
     const float u = (xw + 0.5f) / (float)srcImgWidth;
     const float v = (yw + 0.5f) / (float)srcImgHeight;
 
-    const float1 pix = tex2D(planeSweepGrayscaleTexture, u, v);
+    const float1 pix = tex2D(g_gray_scale_texture, u, v);
 
     const float i = __saturatef(fabs(pix.x)) * 255;
 
@@ -690,7 +693,7 @@ void planeSweepWarpAD(const DeviceImage &srcImg, bool color,
   } else {
     // bind the grayscale texture
     PSL_CUDA_CHECKED_CALL(
-        cudaBindTexture2D(0, planeSweepGrayscaleTexture, srcImg.getAddr(),
+        cudaBindTexture2D(0, g_gray_scale_texture, srcImg.getAddr(),
                           planeSweepGrayscaleChannelDesc, srcImg.getWidth(),
                           srcImg.getHeight(), srcImg.getPitch());)
 
@@ -699,7 +702,7 @@ void planeSweepWarpAD(const DeviceImage &srcImg, bool color,
         homography[2], homography[3], homography[4], homography[5],
         homography[6], homography[7], homography[8], refImg, costBuf);
     PSL_CUDA_CHECK_ERROR
-    PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTexture);)
+    PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(g_gray_scale_texture);)
   }
 }
 
@@ -754,25 +757,25 @@ __global__ void planeSweepWarpADAccumGrayscaleKernel(
   const int height = refImg.getHeight();
 
   if (x < width && y < height) {
-    // apply homography
+    // Warp reference image coordinate to source image via homography.
     float xw = h11 * x + h12 * y + h13;
     float yw = h21 * x + h22 * y + h23;
     float zw = h31 * x + h32 * y + h33;
-
     xw = xw / zw;
     yw = yw / zw;
 
+    // Convert to source image coordinate.
     const float u = (xw + 0.5f) / (float)srcImgWidth;
     const float v = (yw + 0.5f) / (float)srcImgHeight;
 
-    const float1 pix = tex2D(planeSweepGrayscaleTexture, u, v);
-
+    // Extract pixel value of source images.
+    const float1 pix = tex2D(g_gray_scale_texture, u, v);
     const float i = __saturatef(fabs(pix.x)) * 255;
 
-    // ad
+    // Reference image pix vs source image pix.
     float id = fabs((float)(refImg(x, y) - i));
 
-    // accumulate
+    // Accumulate result in buffer.
     costAccumBuf(x, y) += accumScale * id;
   }
 }
@@ -803,7 +806,7 @@ void planeSweepWarpADAccum(DeviceImage &srcImg, bool color,
   } else {
     // bind the grayscale texture
     PSL_CUDA_CHECKED_CALL(
-        cudaBindTexture2D(0, planeSweepGrayscaleTexture, srcImg.getAddr(),
+        cudaBindTexture2D(0, g_gray_scale_texture, srcImg.getAddr(),
                           planeSweepGrayscaleChannelDesc, srcImg.getWidth(),
                           srcImg.getHeight(), srcImg.getPitch());)
 
@@ -813,7 +816,7 @@ void planeSweepWarpADAccum(DeviceImage &srcImg, bool color,
         homography[6], homography[7], homography[8], refImg, accumScale,
         costAccumBuf);
     PSL_CUDA_CHECK_ERROR
-    PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(planeSweepGrayscaleTexture);)
+    PSL_CUDA_CHECKED_CALL(cudaUnbindTexture(g_gray_scale_texture);)
   }
 }
 
@@ -1437,7 +1440,7 @@ __forceinline__ __device__ float computeWarpedGrayscaleTexturePixel(
   const float u = (xw + 0.5f) / (float)width;
   const float v = (yw + 0.5f) / (float)height;
 
-  const float1 pix = tex2D(planeSweepGrayscaleTexture, u, v);
+  const float1 pix = tex2D(g_gray_scale_texture, u, v);
 
   return pix.x * 255;
 }

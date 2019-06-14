@@ -207,9 +207,10 @@ private:
 
   PlaneSweepMatchingCosts matchingCosts;
 
-  void planeHomography(const Matrix<double, 4, 1> &plane,
-                       const CameraMatrix<double> &refCam,
-                       const CameraMatrix<double> &otherCam, float *H);
+  void ComputeHomographyFromReferenceImage(const Matrix<double, 4, 1> &plane,
+                                           const CameraMatrix<double> &refCam,
+                                           const CameraMatrix<double> &otherCam,
+                                           float *H);
   void matchImage(const CudaPlaneSweepImage &refImg,
                   const CudaPlaneSweepImage &otherImg,
                   const Matrix<double, 4, 1> &plane,

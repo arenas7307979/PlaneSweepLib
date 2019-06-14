@@ -41,4 +41,5 @@ add_library(PSL STATIC
 target_link_libraries(PSL
   ${OpenCV_LIBRARIES}
   ${CUDA_CUDART_LIBRARY}
+  ${GLOG_LIBRARIES}
 )

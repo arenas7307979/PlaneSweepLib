@@ -215,11 +215,200 @@ int UploadImageToDevice(const std::vector<std::string> &image_file_paths,
   }
   return ref_img_id_in_cps;
 }
+
+std::string GetEnumString(PSL::PlaneSweepMatchingCosts matching_cost) {
+  std::string label = "";
+  switch (matching_cost) {
+  case PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD:
+    label = "PLANE_SWEEP_SAD";
+    break;
+  case PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC:
+    label = "PLANE_SWEEP_ZNCC";
+    break;
+  }
+  return label;
 }
 
-int main(int argc, char *argv[]) {
-  std::string dataFolder;
+std::string GetEnumString(PSL::PlaneSweepOcclusionMode occlusion_mode) {
+  std::string label = "";
+  switch (occlusion_mode) {
+  case PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE:
+    label = "PLANE_SWEEP_OCCLUSION_NONE";
+    break;
+  case PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_REF_SPLIT:
+    label = "PLANE_SWEEP_OCCLUSION_REF_SPLIT";
+    break;
+  case PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K:
+    label = "PLANE_SWEEP_OCCLUSION_BEST_K";
+    break;
+  }
+  return label;
+}
 
+void PinholePlaneSweepTest(const PSL::PlaneSweepMatchingCosts matching_cost,
+                           const PSL::PlaneSweepOcclusionMode occlusion_mode,
+                           const int occlusion_best_k,
+                           const int reference_img_id, const float min_z,
+                           const float max_z, PSL::CudaPlaneSweep &cPS,
+                           int window_time) {
+
+  cPS.setMatchingCosts(matching_cost);
+  cPS.setOcclusionMode(occlusion_mode);
+  cPS.setOcclusionBestK(occlusion_best_k);
+  cPS.process(reference_img_id);
+  PSL::DepthMap<float, double> dM;
+  dM = cPS.getBestDepth();
+  cv::Mat refImage = cPS.downloadImage(reference_img_id);
+
+  /*
+MakeOutputFolder("pinholeTestResults/grayscaleZNCC/BestK/");
+cv::imwrite("pinholeTestResults/grayscaleZNCC/BestK/refImg.png", refImage);
+dM.saveInvDepthAsColorImage(
+    "pinholeTestResults/grayscaleZNCC/BestK/invDepthCol.png", min_z,
+    reference_img_id);
+    */
+
+  std::string title =
+      GetEnumString(matching_cost) + " - " + GetEnumString(occlusion_mode);
+  cv::Mat inv_depth_mat;
+  // dM.ComputeDepthMat(min_z, max_z, inv_depth_mat);
+  dM.ComputeColoredDepthMat(min_z, max_z, inv_depth_mat);
+  cv::imshow("Reference Image : " + title, refImage);
+  cv::imshow("Depth Map : " + title, inv_depth_mat);
+  cv::waitKey(window_time);
+}
+}
+
+int OriginalTest(int argc, char *argv[]) {
+
+  std::string dataFolder;
+  boost::program_options::options_description desc("Allowed options");
+  desc.add_options()("help", "Produce help message")(
+      "dataFolder", boost::program_options::value<std::string>(&dataFolder)
+                        ->default_value("DataPinholeCamera/niederdorf2"),
+      "One of the data folders for pinhole planesweep provided with the plane "
+      "sweep code.");
+
+  boost::program_options::variables_map vm;
+  boost::program_options::store(
+      boost::program_options::command_line_parser(argc, argv)
+          .options(desc)
+          .run(),
+      vm);
+  boost::program_options::notify(vm);
+
+  if (vm.count("help")) {
+    std::cout << desc << std::endl;
+    return 1;
+  }
+
+  // Load camera matrix from file.
+  Eigen::Matrix3d K = LoadKMatrixFromFile(dataFolder + "/K.txt");
+
+  // Load camera poses from files.
+  std::map<int, PSL::CameraMatrix<double>> cameras =
+      LoadCameraMatrixFromFile(dataFolder + "/model-0-cams.txt", K);
+
+  // Load image filenames.
+  std::vector<std::string> imageFileNames, image_file_paths;
+  LoadImageFilePaths(dataFolder + "/images.txt", dataFolder, imageFileNames,
+                     image_file_paths);
+
+  // Compute average distance.
+  float minZ, maxZ;
+  CalculateMinMaxRange(imageFileNames.size(), cameras, minZ, maxZ);
+
+  //
+  MakeOutputFolder("pinholeTestResults");
+
+  // Color
+  {
+    PSL::CudaPlaneSweep cPS =
+        CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
+    cPS.enableColorMatching(true);
+
+    // Use 5 color images.
+    {
+      int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_REF_SPLIT, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
+    }
+
+    // Use 25 color images.
+    {
+      int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
+    }
+  }
+
+  // Gray
+  // First tests compute a depth map for the middle image of the first row
+  {
+
+    PSL::CudaPlaneSweep cPS =
+        CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
+    cPS.enableColorMatching(false);
+
+    // Use 5 gray images.
+    {
+      int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_REF_SPLIT, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_REF_SPLIT, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
+    }
+
+    // Use 25 gray images.
+    {
+
+      int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
+    }
+  }
+
+  return 0;
+}
+
+int DebugTest(int argc, char *argv[]) {
+
+  std::string dataFolder;
   boost::program_options::options_description desc("Allowed options");
   desc.add_options()("help", "Produce help message")(
       "dataFolder", boost::program_options::value<std::string>(&dataFolder)
@@ -260,230 +449,57 @@ int main(int argc, char *argv[]) {
   MakeOutputFolder("pinholeTestResults");
 
 #if 0
-  // First tests compute a depth map for the middle image of the first row
+  // Color
   {
-    MakeOutputFolder("pinholeTestResults/colorSAD");
     PSL::CudaPlaneSweep cPS =
         CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
     cPS.enableColorMatching(true);
 
-
+    // Use 5 color images.
     {
-      int refId = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+      int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
 
-      {
-        cPS.process(refId);
-        PSL::DepthMap<float, double> dM;
-        dM = cPS.getBestDepth();
-        cv::Mat refImage = cPS.downloadImage(refId);
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
 
-        MakeOutputFolder("pinholeTestResults/colorSAD/NoOcclusionHandling/");
-        cv::imwrite(
-            "pinholeTestResults/colorSAD/NoOcclusionHandling/refImg.png",
-            refImage);
-        dM.saveInvDepthAsColorImage(
-            "pinholeTestResults/colorSAD/NoOcclusionHandling/invDepthCol.png",
-            minZ, maxZ);
 
-        cv::imshow("Reference Image", refImage);
-        dM.displayInvDepthColored(minZ, maxZ, 100);
-      }
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 5,
+          ref_img_id, minZ, maxZ, cPS, 0);
 
-      {
-        cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
-        cPS.process(refId);
-        PSL::DepthMap<float, double> dM;
-        dM = cPS.getBestDepth();
-        cv::Mat refImage = cPS.downloadImage(refId);
 
-        MakeOutputFolder("pinholeTestResults/colorSAD/RefSplit/");
-        cv::imwrite("pinholeTestResults/colorSAD/RefSplit/refImg.png",
-                    refImage);
-        dM.saveInvDepthAsColorImage(
-            "pinholeTestResults/colorSAD/RefSplit/invDepthCol.png", minZ, maxZ);
-
-        cv::imshow("Reference Image", refImage);
-        dM.displayInvDepthColored(minZ, maxZ, 100);
-      }
-    }
-
-    {
-      // now we add the remaining images and use best K occlusion handling
-      int refId = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
-
-      {
-        cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
-        cPS.setOcclusionBestK(5);
-        cPS.process(refId);
-        PSL::DepthMap<float, double> dM;
-        dM = cPS.getBestDepth();
-        cv::Mat refImage = cPS.downloadImage(refId);
-
-        MakeOutputFolder("pinholeTestResults/colorSAD/BestK/");
-        cv::imwrite("pinholeTestResults/colorSAD/BestK/refImg.png", refImage);
-        dM.saveInvDepthAsColorImage(
-            "pinholeTestResults/colorSAD/BestK/invDepthCol.png", minZ, maxZ);
-
-        cv::imshow("Reference Image", refImage);
-        dM.displayInvDepthColored(minZ, maxZ, 100);
-      }
     }
   }
 
-#else
+#endif
+#if 1
+  // Gray
   // First tests compute a depth map for the middle image of the first row
   {
-
     PSL::CudaPlaneSweep cPS =
         CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
+    cPS.enableColorMatching(false);
 
-#if 0
-
-    MakeOutputFolder("pinholeTestResults/grayscaleSAD");
-    MakeOutputFolder("pinholeTestResults/grayscaleZNCC");
-
-
-    int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
-
+    // Use 5 gray images.
     {
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-      cPS.process(ref_img_id);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(ref_img_id);
+      int ref_img_id = UploadImageToDevice(image_file_paths, 3, cameras, cPS);
 
-      MakeOutputFolder("pinholeTestResults/grayscaleSAD/NoOcclusionHandling/");
-      cv::imwrite(
-          "pinholeTestResults/grayscaleSAD/NoOcclusionHandling/refImg.png",
-          refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/grayscaleSAD/NoOcclusionHandling/invDepthCol.png",
-          minZ, maxZ);
-
-      cv::Mat inv_depth_mat;
-      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-      cv::imshow("Reference Image", refImage);
-      cv::imshow("Depth Map by PLANE_SWEEP_SAD", inv_depth_mat);
-      cv::waitKey(1000);
-    }
-
-    {
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
-      cPS.process(ref_img_id);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(ref_img_id);
-
-      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/NoOcclusionHandling/");
-      cv::imwrite(
-          "pinholeTestResults/grayscaleZNCC/NoOcclusionHandling/refImg.png",
-          refImage);
-      dM.saveInvDepthAsColorImage("pinholeTestResults/grayscaleZNCC/"
-                                  "NoOcclusionHandling/invDepthCol.png",
-                                  minZ, maxZ);
-
-      cv::Mat inv_depth_mat;
-      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-      cv::imshow("Reference Image", refImage);
-      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
-      cv::waitKey(1000);
-    }
-
-    {
-      cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_REF_SPLIT);
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-      cPS.process(ref_img_id);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(ref_img_id);
-
-      MakeOutputFolder("pinholeTestResults/grayscaleSAD/RefSplit/");
-      cv::imwrite("pinholeTestResults/grayscaleSAD/RefSplit/refImg.png",
-                  refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/grayscaleSAD/RefSplit/invDepthCol.png", minZ,
-          maxZ);
-
-      cv::Mat inv_depth_mat;
-      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-      cv::imshow("Reference Image", refImage);
-      cv::imshow("Depth Map by PLANE_SWEEP_OCCLUSION_REF_SPLIT", inv_depth_mat);
-      cv::waitKey(1000);
-    }
-
-    {
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
-      cPS.process(ref_img_id);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(ref_img_id);
-
-      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/RefSplit/");
-      cv::imwrite("pinholeTestResults/grayscaleZNCC/RefSplit/refImg.png",
-                  refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/grayscaleZNCC/RefSplit/invDepthCol.png", minZ,
-          maxZ);
-
-      cv::Mat inv_depth_mat;
-      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-      cv::imshow("Reference Image", refImage);
-      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
-      cv::waitKey(1000);
-    }
-
-#endif
-
-    int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
-
-    /*
-
-        {
-          cPS.setOcclusionMode(PSL::PLANE_SWEEP_OCCLUSION_BEST_K);
-          cPS.setMatchingCosts(PSL::PLANE_SWEEP_SAD);
-          cPS.setOcclusionBestK(5);
-          cPS.process(ref_img_id);
-          PSL::DepthMap<float, double> dM;
-          dM = cPS.getBestDepth();
-          cv::Mat refImage = cPS.downloadImage(ref_img_id);
-
-          MakeOutputFolder("pinholeTestResults/grayscaleSAD/BestK/");
-          cv::imwrite("pinholeTestResults/grayscaleSAD/BestK/refImg.png",
-       refImage);
-          dM.saveInvDepthAsColorImage(
-              "pinholeTestResults/grayscaleSAD/BestK/invDepthCol.png", minZ,
-       maxZ);
-
-          cv::Mat inv_depth_mat;
-          dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-          cv::imshow("Reference Image", refImage);
-          cv::imshow("Depth Map by PLANE_SWEEP_OCCLUSION_BEST_K",
-       inv_depth_mat);
-          cv::waitKey(1000);
-        }
-
-    */
-
-    {
-      cPS.setMatchingCosts(PSL::PLANE_SWEEP_ZNCC);
-      cPS.setOcclusionBestK(5);
-      cPS.process(ref_img_id);
-      PSL::DepthMap<float, double> dM;
-      dM = cPS.getBestDepth();
-      cv::Mat refImage = cPS.downloadImage(ref_img_id);
-
-      MakeOutputFolder("pinholeTestResults/grayscaleZNCC/BestK/");
-      cv::imwrite("pinholeTestResults/grayscaleZNCC/BestK/refImg.png",
-                  refImage);
-      dM.saveInvDepthAsColorImage(
-          "pinholeTestResults/grayscaleZNCC/BestK/invDepthCol.png", minZ, maxZ);
-
-      cv::Mat inv_depth_mat;
-      dM.ComputeDepthMat(minZ, maxZ, inv_depth_mat);
-      cv::imshow("Reference Image", refImage);
-      cv::imshow("Depth Map by PLANE_SWEEP_ZNCC", inv_depth_mat);
-      cv::waitKey(1000);
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 0,
+          ref_img_id, minZ, maxZ, cPS, 0);
     }
   }
 #endif
+
+  return 0;
+}
+
+int main(int argc, char *argv[]) {
+  // OriginalTest(argc, argv);
+  DebugTest(argc, argv);
+  return 0;
 }

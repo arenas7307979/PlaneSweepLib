@@ -52,6 +52,7 @@ public:
   void ComputeDepthMat(T minZ, T maxZ, cv::Mat &depth_inv_mat);
   void displayInvDepth(T minZ, T maxZ, int displayTime = 0,
                        const char *windowName = "inverse depth map");
+  void ComputeColoredDepthMat(T minZ, T maxZ, cv::Mat &depth_inv_mat);
   void displayInvDepthColored(
       T minZ, T maxZ, int displayTime = 0,
       const char *windowName = "color coded inverse depth map");
