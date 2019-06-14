@@ -15,51 +15,40 @@
 // You should have received a copy of the GNU General Public License
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
-#include "deviceImage.h"
 #include "deviceImage.cuh"
+#include "deviceImage.h"
 
-namespace PSL_CUDA
-{
-    namespace DeviceImageDeviceCode
-    {
-        __global__ void clearKernel(DeviceImage devImg, unsigned char value)
-        {
-            // get position of outupt
-            unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
-            unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
+namespace PSL_CUDA {
+namespace DeviceImageDeviceCode {
+__global__ void clearKernel(DeviceImage devImg, unsigned char value) {
+  // get position of outupt
+  unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-            if (x < devImg.getWidth()*devImg.getNumChannels() && y < devImg.getHeight())
-            {
-                devImg(x,y) = value;
-            }
-        }
-    }
+  if (x < devImg.getWidth() * devImg.getNumChannels() &&
+      y < devImg.getHeight()) {
+    devImg(x, y) = value;
+  }
+}
+}
 }
 
 using namespace PSL;
 using namespace PSL_CUDA;
 using namespace DeviceImageDeviceCode;
 
+DeviceImage::DeviceImage() { addr = 0; }
 
-DeviceImage::DeviceImage()
-{
-    addr = 0;
+void DeviceImage::deallocate() {
+  PSL_CUDA_CHECKED_CALL(cudaFree((void *)addr);)
+  addr = 0;
 }
 
+void DeviceImage::clear(unsigned char value) {
 
+  dim3 gridDim(getNumTiles(width * numChannels, TILE_WIDTH),
+               getNumTiles(height, TILE_HEIGHT));
+  dim3 blockDim(TILE_WIDTH, TILE_HEIGHT);
 
-void DeviceImage::deallocate()
-{
-    PSL_CUDA_CHECKED_CALL( cudaFree((void *)addr); )
-    addr = 0;
+  clearKernel<<<gridDim, blockDim>>>(*this, value);
 }
-
-void DeviceImage::clear(unsigned char value)
-{
-
-    dim3 gridDim(getNumTiles(width*numChannels, TILE_WIDTH), getNumTiles(height, TILE_HEIGHT));
-    dim3 blockDim(TILE_WIDTH, TILE_HEIGHT);
-
-    clearKernel<<<gridDim, blockDim>>>(*this, value);
-}
-

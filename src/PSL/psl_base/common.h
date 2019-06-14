@@ -15,21 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
-
 #ifdef _MSC_VER
 #include <cmath>
 
-inline double round(double val)
-{    
-	return std::floor(val + 0.5);
-}
+inline double round(double val) { return std::floor(val + 0.5); }
 
-namespace std
-{
-inline long long atoll(const char* str)
-{
-	return (long long) _atoi64(str);
-}
+namespace std {
+inline long long atoll(const char *str) { return (long long)_atoi64(str); }
 }
 
 #endif

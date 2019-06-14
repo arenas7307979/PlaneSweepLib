@@ -16,34 +16,35 @@
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "deviceBuffer.h"
-#include <opencv2/highgui/highgui.hpp>
 #include <iostream>
+#include <opencv2/highgui/highgui.hpp>
 
 using namespace PSL_CUDA;
 
 template <typename T>
-void DeviceBuffer<T>::downloadAndDisplay(int waitTime, T minVal, T maxVal, std::string windowTitle)
-{
-    cv::Mat_<T> mat(height, width);
+void DeviceBuffer<T>::downloadAndDisplay(int waitTime, T minVal, T maxVal,
+                                         std::string windowTitle) {
+  cv::Mat_<T> mat(height, width);
 
-    download((T*)mat.data, mat.step);
+  download((T *)mat.data, mat.step);
 
-    mat -= minVal;
-    mat /= (maxVal - minVal);
+  mat -= minVal;
+  mat /= (maxVal - minVal);
 
-    cv::imshow(windowTitle.c_str(), mat);
+  cv::imshow(windowTitle.c_str(), mat);
 
-    cv::waitKey(waitTime);
+  cv::waitKey(waitTime);
 }
 
-template<typename T>
-void DeviceBuffer<T>::download(T* dstPtr, size_t dstPitch)
-{
-    PSL_CUDA_CHECKED_CALL( cudaMemcpy2D(dstPtr, dstPitch, addr, pitch, sizeof(T)*width, height, cudaMemcpyDeviceToHost); )
+template <typename T>
+void DeviceBuffer<T>::download(T *dstPtr, size_t dstPitch) {
+  PSL_CUDA_CHECKED_CALL(cudaMemcpy2D(dstPtr, dstPitch, addr, pitch,
+                                     sizeof(T) * width, height,
+                                     cudaMemcpyDeviceToHost);)
 }
 
 #ifdef _MSC_VER
-#pragma warning( disable : 4661)
+#pragma warning(disable : 4661)
 #endif
 
 template class DeviceBuffer<float>;

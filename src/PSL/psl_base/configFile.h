@@ -21,29 +21,27 @@
 #include <map>
 #include <string>
 
-namespace PSL
-{
-    using std::map;
-    using std::string;
+namespace PSL {
+using std::map;
+using std::string;
 
-    class ConfigFile {
-    public:
-        ConfigFile(const string& fileName);
+class ConfigFile {
+public:
+  ConfigFile(const string &fileName);
 
-        string get(const string& configParameter);
-        int getAsInt(const string& configParameter);
-        float getAsFloat(const string& configParameter);
+  string get(const string &configParameter);
+  int getAsInt(const string &configParameter);
+  float getAsFloat(const string &configParameter);
 
-        bool isFileRead();
+  bool isFileRead();
 
-    private:
+private:
+  bool fileRead;
 
-        bool fileRead;
+  void parseLine(string &line);
 
-        void parseLine(string& line);
-
-        map<string, string> configEntries;
-    };
+  map<string, string> configEntries;
+};
 }
 
 #endif // CONFIGFILE_H

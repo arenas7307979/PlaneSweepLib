@@ -18,8 +18,7 @@
 #ifndef COLORMAPJET_H
 #define COLORMAPJET_H
 
-namespace PSL
-{
+namespace PSL {
 extern float colorMapJet[256][3];
 }
 

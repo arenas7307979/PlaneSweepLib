@@ -16,72 +16,62 @@
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "deviceImage.h"
-#include <opencv2/highgui/highgui.hpp>
 #include <iostream>
+#include <opencv2/highgui/highgui.hpp>
 
 using namespace PSL_CUDA;
 
-void DeviceImage::allocatePitchedAndUpload(const cv::Mat& img)
-{
-    if (img.type() == CV_8UC4)
-    {
-        this->width = img.cols;
-        this->height = img.rows;
-        this->numChannels = 4;
-    }
-    else if (img.type() == CV_8UC1)
-    {
-        this->width = img.cols;
-        this->height = img.rows;
-        this->numChannels = 1;
-    }
-    else
-    {
-        PSL_THROW_EXCEPTION ( "Only BRGA and Grayscale supported!")
-    }
+void DeviceImage::allocatePitchedAndUpload(const cv::Mat &img) {
+  if (img.type() == CV_8UC4) {
+    this->width = img.cols;
+    this->height = img.rows;
+    this->numChannels = 4;
+  } else if (img.type() == CV_8UC1) {
+    this->width = img.cols;
+    this->height = img.rows;
+    this->numChannels = 1;
+  } else {
+    PSL_THROW_EXCEPTION("Only BRGA and Grayscale supported!")
+  }
 
-    PSL_CUDA_CHECKED_CALL( cudaMallocPitch(&addr, &pitch, width*numChannels, height); )
-    PSL_CUDA_CHECKED_CALL( cudaMemcpy2D(addr, pitch, img.data, img.step, width*numChannels, height, cudaMemcpyHostToDevice); )
+  PSL_CUDA_CHECKED_CALL(
+      cudaMallocPitch(&addr, &pitch, width * numChannels, height);)
+  PSL_CUDA_CHECKED_CALL(cudaMemcpy2D(addr, pitch, img.data, img.step,
+                                     width * numChannels, height,
+                                     cudaMemcpyHostToDevice);)
 }
 
-void DeviceImage::reallocatePitchedAndUpload(const cv::Mat& img)
-{
-    if ((img.type() == CV_8UC4 && numChannels != 4)
-            || (img.type() == CV_8UC1 && numChannels != 1)
-            || (img.cols != width)
-            || (img.rows != height))
-    {
-        deallocate();
-        allocatePitchedAndUpload(img);
-    }
-    else
-    {
-        PSL_CUDA_CHECKED_CALL( cudaMemcpy2D(addr, pitch, img.data, img.step, width*numChannels, height, cudaMemcpyHostToDevice); )
-    }
+void DeviceImage::reallocatePitchedAndUpload(const cv::Mat &img) {
+  if ((img.type() == CV_8UC4 && numChannels != 4) ||
+      (img.type() == CV_8UC1 && numChannels != 1) || (img.cols != width) ||
+      (img.rows != height)) {
+    deallocate();
+    allocatePitchedAndUpload(img);
+  } else {
+    PSL_CUDA_CHECKED_CALL(cudaMemcpy2D(addr, pitch, img.data, img.step,
+                                       width * numChannels, height,
+                                       cudaMemcpyHostToDevice);)
+  }
 }
 
-void DeviceImage::allocatePitched(int width, int height, int numChannels)
-{
-    this->width = width;
-    this->height = height;
-    this->numChannels = numChannels;
+void DeviceImage::allocatePitched(int width, int height, int numChannels) {
+  this->width = width;
+  this->height = height;
+  this->numChannels = numChannels;
 
-    PSL_CUDA_CHECKED_CALL( cudaMallocPitch(&addr, &pitch, width*numChannels, height); )
+  PSL_CUDA_CHECKED_CALL(
+      cudaMallocPitch(&addr, &pitch, width * numChannels, height);)
 }
 
-void DeviceImage::download(cv::Mat& img)
-{
-    if (numChannels == 4)
-    {
-        img = cv::Mat(height, width, CV_8UC4);
-    }
-    else if (numChannels == 1)
-    {
-        img = cv::Mat(height, width, CV_8UC1);
-    }
-    else
-    {
-        PSL_THROW_EXCEPTION ( "Only BRGA and BRG supported!")
-    }
-    PSL_CUDA_CHECKED_CALL( cudaMemcpy2D(img.data, img.step, addr, pitch, width*numChannels, height, cudaMemcpyDeviceToHost); )
+void DeviceImage::download(cv::Mat &img) {
+  if (numChannels == 4) {
+    img = cv::Mat(height, width, CV_8UC4);
+  } else if (numChannels == 1) {
+    img = cv::Mat(height, width, CV_8UC1);
+  } else {
+    PSL_THROW_EXCEPTION("Only BRGA and BRG supported!")
+  }
+  PSL_CUDA_CHECKED_CALL(cudaMemcpy2D(img.data, img.step, addr, pitch,
+                                     width * numChannels, height,
+                                     cudaMemcpyDeviceToHost);)
 }
