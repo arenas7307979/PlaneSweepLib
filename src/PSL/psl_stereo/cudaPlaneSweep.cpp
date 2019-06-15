@@ -103,15 +103,13 @@ int CudaPlaneSweep::addImage(Mat image, CameraMatrix<double> &cam) {
   if (scale != 1) {
     // scale image
     Mat scaledImage;
-    if (scale < 1)
+    if (scale < 1) {
       resize(image, scaledImage, Size(0, 0), scale, scale, INTER_AREA);
-    else
+    } else {
       resize(image, scaledImage, Size(0, 0), scale, scale, INTER_LINEAR);
+    }
 
     image = scaledImage;
-
-    //        cv::imshow("image", image);
-    //        cv::waitKey(500);
 
     // scale cam
     cPSI.cam.scaleK(scale, scale);
@@ -244,26 +242,26 @@ void CudaPlaneSweep::PrepareCommonBuffer(const int ref_img_idx) {
   }
 
   if (outputUniquenessRatioEnabled) {
-    secondBestPlaneCostBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                                refImg.devImg.getHeight());
-    secondBestPlaneCostBuffer.clear(1e6);
+    dev_best_plane_buffer.second_best_costs.reallocatePitched(
+        refImg.devImg.getWidth(), refImg.devImg.getHeight());
+    dev_best_plane_buffer.second_best_costs.clear(1e6);
   }
 
   if (outputBestDepthEnabled || outputUniquenessRatioEnabled) {
     // allocate best plane buffer
-    bestPlaneBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                      refImg.devImg.getHeight());
+    dev_best_plane_buffer.best_plane_idx.reallocatePitched(
+        refImg.devImg.getWidth(), refImg.devImg.getHeight());
     // initialize to zero,
     // this is necessary because the buffer on the gpu can be bigger than the
     // actual image and we need to have valid plane indices everywhere
     // for the best depth computation
-    bestPlaneBuffer.clear(0);
+    dev_best_plane_buffer.best_plane_idx.clear(0);
 
     // allocate best plane cost buffer
-    bestPlaneCostBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                          refImg.devImg.getHeight());
+    dev_best_plane_buffer.best_costs.reallocatePitched(
+        refImg.devImg.getWidth(), refImg.devImg.getHeight());
     // initialize to big value
-    bestPlaneCostBuffer.clear(1e6);
+    dev_best_plane_buffer.best_costs.clear(1e6);
   }
 }
 
@@ -297,15 +295,6 @@ void CudaPlaneSweep::AccumulateCostWithOcclusionNone(
     const double accum_scale0, PSL::CudaPlaneSweepImage &matched_img,
     PSL::CudaPlaneSweepImage &refImg) {
 
-  /*
-    // Cost accumulation from each reference images.
-    for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
-         it != images.end(); it++) {
-      if (it->first == ref_img_idx) {
-        continue;
-      }
-  */
-  // match the image
   float H[9];
   ComputeHomographyFromReferenceImage(plane, refImg.cam, matched_img.cam, H);
 
@@ -321,7 +310,6 @@ void CudaPlaneSweep::AccumulateCostWithOcclusionNone(
                             matchWindowRadiusX, matchWindowRadiusY);
   } break;
   }
-  //  }
 }
 
 void CudaPlaneSweep::ApplyBoxFilterForAccumulatedCost() {
@@ -343,15 +331,14 @@ void CudaPlaneSweep::UpdateBestPlane(const int plane_idx,
         planeSweepUpdateBestAndSecondBestPlaneSubPixel(
             costAccumBuffer, subPixelCostAccumBufferPrev1,
             subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
-            refImg.devImg.getHeight(), plane_idx - 1, bestPlaneCostBuffer,
-            secondBestPlaneCostBuffer, bestPlaneBuffer,
+            refImg.devImg.getHeight(), plane_idx - 1, dev_best_plane_buffer,
             subPixelPlaneOffsetsBuffer);
       } else {
         planeSweepUpdateBestPlaneSubPixel(
             costAccumBuffer, subPixelCostAccumBufferPrev1,
             subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
-            refImg.devImg.getHeight(), plane_idx - 1, bestPlaneCostBuffer,
-            bestPlaneBuffer, subPixelPlaneOffsetsBuffer);
+            refImg.devImg.getHeight(), plane_idx - 1, dev_best_plane_buffer,
+            subPixelPlaneOffsetsBuffer);
       }
     }
   }
@@ -361,13 +348,12 @@ void CudaPlaneSweep::UpdateBestPlane(const int plane_idx,
       if (outputUniquenessRatioEnabled) {
         planeSweepUpdateBestAndSecondBestPlane(
             costAccumBuffer, refImg.devImg.getWidth(),
-            refImg.devImg.getHeight(), plane_idx, bestPlaneCostBuffer,
-            secondBestPlaneCostBuffer, bestPlaneBuffer);
+            refImg.devImg.getHeight(), plane_idx, dev_best_plane_buffer);
 
       } else {
         planeSweepUpdateBestPlane(costAccumBuffer, refImg.devImg.getWidth(),
                                   refImg.devImg.getHeight(), plane_idx,
-                                  bestPlaneCostBuffer, bestPlaneBuffer);
+                                  dev_best_plane_buffer);
       }
     }
   }
@@ -408,38 +394,40 @@ void CudaPlaneSweep::ComputeBestDepth(const int ref_img_idx) {
     switch (subPixelInterpMode) {
     case PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE:
       planeSweepComputeBestDepthsSubPixelInverse(
-          bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
-          bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
-          KrefInvVec);
+          dev_best_plane_buffer.best_plane_idx, subPixelPlaneOffsetsBuffer,
+          numPlanes, planesVec, bestDepth.getDataPtr(),
+          bestDepth.getWidth() * sizeof(float), KrefInvVec);
       break;
     case PLANE_SWEEP_SUB_PIXEL_INTERP_DIRECT:
       planeSweepComputeBestDepthsSubPixelDirect(
-          bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
-          bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
-          KrefInvVec);
+          dev_best_plane_buffer.best_plane_idx, subPixelPlaneOffsetsBuffer,
+          numPlanes, planesVec, bestDepth.getDataPtr(),
+          bestDepth.getWidth() * sizeof(float), KrefInvVec);
       break;
     }
   } else {
-    planeSweepComputeBestDepths(
-        bestPlaneBuffer, numPlanes, planesVec, bestDepth.getDataPtr(),
-        bestDepth.getWidth() * sizeof(float), KrefInvVec);
+    planeSweepComputeBestDepths(dev_best_plane_buffer.best_plane_idx, numPlanes,
+                                planesVec, bestDepth.getDataPtr(),
+                                bestDepth.getWidth() * sizeof(float),
+                                KrefInvVec);
   }
 }
 
 void CudaPlaneSweep::ComputeUniquenessRatio() {
-  computeUniquenessRatio(bestPlaneCostBuffer, secondBestPlaneCostBuffer,
-                         secondBestPlaneCostBuffer);
-  uniqunessRatios = Grid<float>(bestPlaneCostBuffer.getWidth(),
-                                bestPlaneCostBuffer.getHeight());
-  secondBestPlaneCostBuffer.download(
+  computeUniquenessRatio(dev_best_plane_buffer.best_costs,
+                         dev_best_plane_buffer.second_best_costs,
+                         dev_best_plane_buffer.second_best_costs);
+  uniqunessRatios = Grid<float>(dev_best_plane_buffer.best_costs.getWidth(),
+                                dev_best_plane_buffer.best_costs.getHeight());
+  dev_best_plane_buffer.second_best_costs.download(
       uniqunessRatios.getDataPtr(), uniqunessRatios.getWidth() * sizeof(float));
 }
 
 void CudaPlaneSweep::DownloadBestCost() {
-  bestCosts = Grid<float>(bestPlaneCostBuffer.getWidth(),
-                          bestPlaneCostBuffer.getHeight());
-  bestPlaneCostBuffer.download(bestCosts.getDataPtr(),
-                               bestCosts.getWidth() * sizeof(float));
+  bestCosts = Grid<float>(dev_best_plane_buffer.best_costs.getWidth(),
+                          dev_best_plane_buffer.best_costs.getHeight());
+  dev_best_plane_buffer.best_costs.download(
+      bestCosts.getDataPtr(), bestCosts.getWidth() * sizeof(float));
 }
 
 void CudaPlaneSweep::PrepareOcclusionBestKBuffer(const int ref_img_idx) {
@@ -914,14 +902,14 @@ void CudaPlaneSweep::deallocateBuffers() {
   if (boxFilterTempBuffer.getAddr() != 0)
     boxFilterTempBuffer.deallocate();
 
-  if (bestPlaneBuffer.getAddr() != 0)
-    bestPlaneBuffer.deallocate();
+  if (dev_best_plane_buffer.best_plane_idx.getAddr() != 0)
+    dev_best_plane_buffer.best_plane_idx.deallocate();
 
-  if (bestPlaneCostBuffer.getAddr() != 0)
-    bestPlaneCostBuffer.deallocate();
+  if (dev_best_plane_buffer.best_costs.getAddr() != 0)
+    dev_best_plane_buffer.best_costs.deallocate();
 
-  if (secondBestPlaneCostBuffer.getAddr() != 0)
-    secondBestPlaneCostBuffer.deallocate();
+  if (dev_best_plane_buffer.second_best_costs.getAddr() != 0)
+    dev_best_plane_buffer.second_best_costs.deallocate();
 
   for (unsigned int i = 0; i < costBuffers.size(); i++) {
     if (costBuffers[i].getAddr() != 0)

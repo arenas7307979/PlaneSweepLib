@@ -15,15 +15,16 @@
 // You should have received a copy of the GNU General Public License
 // along with PSL.  If not, see <http://www.gnu.org/licenses/>.
 
+// System
 #include <iostream>
 #include <map>
 #include <vector>
 
+// PSL
+#include "cudaPlaneSweepContainer.h"
 #include <psl_cudaBase/cudaCommon.h>
-
 #include <psl_cudaBase/deviceBuffer.cuh>
 #include <psl_cudaBase/deviceBuffer.h>
-
 #include <psl_cudaBase/deviceImage.cuh>
 #include <psl_cudaBase/deviceImage.h>
 
@@ -706,6 +707,22 @@ void planeSweepWarpAD(const DeviceImage &srcImg, bool color,
   }
 }
 
+__device__ void cudaWarpPointViaHomography(
+    const unsigned int x, const unsigned int y, const int img_width,
+    const int img_height, const float h11, const float h12, const float h13,
+    const float h21, const float h22, const float h23, const float h31,
+    const float h32, const float h33, float *u, float *v) {
+  float xw = h11 * x + h12 * y + h13;
+  float yw = h21 * x + h22 * y + h23;
+  float zw = h31 * x + h32 * y + h33;
+
+  xw = xw / zw;
+  yw = yw / zw;
+
+  *u = (xw + 0.5f) / (float)img_width;
+  *v = (yw + 0.5f) / (float)img_height;
+}
+
 __global__ void planeSweepWarpADAccumColorKernel(
     const int srcImgWidth, const int srcImgHeight, float h11, float h12,
     float h13, float h21, float h22, float h23, float h31, float h32, float h33,
@@ -718,16 +735,10 @@ __global__ void planeSweepWarpADAccumColorKernel(
   const int height = refImg.getHeight();
 
   if (x < width && y < height) {
-    // apply homography
-    float xw = h11 * x + h12 * y + h13;
-    float yw = h21 * x + h22 * y + h23;
-    float zw = h31 * x + h32 * y + h33;
 
-    xw = xw / zw;
-    yw = yw / zw;
-
-    const float u = (xw + 0.5f) / (float)srcImgWidth;
-    const float v = (yw + 0.5f) / (float)srcImgHeight;
+    float u, v;
+    cudaWarpPointViaHomography(x, y, width, height, h11, h12, h13, h21, h22,
+                               h23, h31, h32, h33, &u, &v);
 
     const float4 rgba = tex2D(planeSweepColorTexture, u, v);
 
@@ -757,16 +768,9 @@ __global__ void planeSweepWarpADAccumGrayscaleKernel(
   const int height = refImg.getHeight();
 
   if (x < width && y < height) {
-    // Warp reference image coordinate to source image via homography.
-    float xw = h11 * x + h12 * y + h13;
-    float yw = h21 * x + h22 * y + h23;
-    float zw = h31 * x + h32 * y + h33;
-    xw = xw / zw;
-    yw = yw / zw;
-
-    // Convert to source image coordinate.
-    const float u = (xw + 0.5f) / (float)srcImgWidth;
-    const float v = (yw + 0.5f) / (float)srcImgHeight;
+    float u, v;
+    cudaWarpPointViaHomography(x, y, width, height, h11, h12, h13, h21, h22,
+                               h23, h31, h32, h33, &u, &v);
 
     // Extract pixel value of source images.
     const float1 pix = tex2D(g_gray_scale_texture, u, v);
@@ -880,38 +884,38 @@ void planeSweepAccumCostBestK(DeviceBuffer<float> &costAccumBuf,
   PSL_CUDA_CHECK_ERROR
 }
 
-__global__ void planeSweepUpdateBestPlaneKernel(
-    DeviceBuffer<float> newCosts, int currPlaneIndex,
-    DeviceBuffer<float> bestPlaneCosts, DeviceBuffer<int> bestPlanes) {
+__global__ void planeSweepUpdateBestPlaneKernel(DeviceBuffer<float> newCosts,
+                                                int currPlaneIndex,
+                                                BestPlaneBuffer best_plane) {
+
   // get position of outupt
   unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
   unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (x < newCosts.getWidth() && y < newCosts.getHeight()) {
-    if (newCosts(x, y) <= bestPlaneCosts(x, y)) {
-      bestPlaneCosts(x, y) = newCosts(x, y);
-      bestPlanes(x, y) = currPlaneIndex;
+    if (newCosts(x, y) <= best_plane.best_costs(x, y)) {
+      best_plane.best_costs(x, y) = newCosts(x, y);
+      best_plane.best_plane_idx(x, y) = currPlaneIndex;
     }
   }
 }
 
 void planeSweepUpdateBestPlane(const DeviceBuffer<float> &newCosts, int width,
                                int height, int currPlaneIndex,
-                               DeviceBuffer<float> &bestPlaneCosts,
-                               DeviceBuffer<int> &bestPlanes) {
+                               BestPlaneBuffer &dev_best_plane) {
   dim3 gridDim(getNumTiles(width, PLANE_SWEEP_TILE_WIDTH),
                getNumTiles(height, PLANE_SWEEP_TILE_HEIGHT));
   dim3 blockDim(PLANE_SWEEP_TILE_WIDTH, PLANE_SWEEP_TILE_HEIGHT);
 
   planeSweepUpdateBestPlaneKernel<<<gridDim, blockDim>>>(
-      newCosts, currPlaneIndex, bestPlaneCosts, bestPlanes);
+      newCosts, currPlaneIndex, dev_best_plane);
+
   PSL_CUDA_CHECK_ERROR
 }
 
 __global__ void planeSweepUpdateBestPlaneSubPixelKernel(
     DeviceBuffer<float> currCosts, DeviceBuffer<float> prev1,
-    DeviceBuffer<float> prev2, int prevPlaneIdx,
-    DeviceBuffer<float> bestPlaneCosts, DeviceBuffer<int> bestPlanes,
+    DeviceBuffer<float> prev2, int prevPlaneIdx, BestPlaneBuffer dev_best_plane,
     DeviceBuffer<float> subPixelPlaneOffsets) {
   // get position of outupt
   unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -919,7 +923,7 @@ __global__ void planeSweepUpdateBestPlaneSubPixelKernel(
 
   if (x < currCosts.getWidth() && y < currCosts.getHeight()) {
     // we only comput the parabola if we found a new minimal cost
-    if (prev1(x, y) <= bestPlaneCosts(x, y)) {
+    if (prev1(x, y) <= dev_best_plane.best_costs(x, y)) {
 
       // parabola
       const float denom = currCosts(x, y) + prev2(x, y) - 2 * prev1(x, y);
@@ -928,10 +932,10 @@ __global__ void planeSweepUpdateBestPlaneSubPixelKernel(
         offset = (prev2(x, y) - prev1(x, y)) / denom - 0.5f;
       }
 
-      bestPlanes(x, y) = prevPlaneIdx;
+      dev_best_plane.best_plane_idx(x, y) = prevPlaneIdx;
+      // we use the actual cost of the minimal plane for robustnes
+      dev_best_plane.best_costs(x, y) = prev1(x, y);
       subPixelPlaneOffsets(x, y) = offset;
-      bestPlaneCosts(x, y) = prev1(
-          x, y); // we use the actual cost of the minimal plane for robustnes
     }
   }
 }
@@ -939,57 +943,54 @@ __global__ void planeSweepUpdateBestPlaneSubPixelKernel(
 void planeSweepUpdateBestPlaneSubPixel(
     const DeviceBuffer<float> &currCosts, const DeviceBuffer<float> &prev1,
     const DeviceBuffer<float> &prev2, int width, int height, int prevPlaneIdx,
-    DeviceBuffer<float> &bestPlaneCosts, DeviceBuffer<int> &bestPlanes,
+    BestPlaneBuffer &dev_best_plane,
     DeviceBuffer<float> &subPixelPlaneOffsets) {
   dim3 gridDim(getNumTiles(width, PLANE_SWEEP_TILE_WIDTH),
                getNumTiles(height, PLANE_SWEEP_TILE_HEIGHT));
   dim3 blockDim(PLANE_SWEEP_TILE_WIDTH, PLANE_SWEEP_TILE_HEIGHT);
 
   planeSweepUpdateBestPlaneSubPixelKernel<<<gridDim, blockDim>>>(
-      currCosts, prev1, prev2, prevPlaneIdx, bestPlaneCosts, bestPlanes,
+      currCosts, prev1, prev2, prevPlaneIdx, dev_best_plane,
       subPixelPlaneOffsets);
   PSL_CUDA_CHECK_ERROR
 }
 
-__global__ void planeSweepUpdateBestAndSecondBestPlaneKernel(
-    DeviceBuffer<float> newCosts, int currPlaneIndex,
-    DeviceBuffer<float> bestPlaneCosts,
-    DeviceBuffer<float> secondBestPlaneCosts, DeviceBuffer<int> bestPlanes) {
+__global__ void
+planeSweepUpdateBestAndSecondBestPlaneKernel(DeviceBuffer<float> newCosts,
+                                             int currPlaneIndex,
+                                             BestPlaneBuffer dev_best_plane) {
 
   // get position of outupt
   unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
   unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (x < newCosts.getWidth() && y < newCosts.getHeight()) {
-    if (newCosts(x, y) <= bestPlaneCosts(x, y)) {
-      secondBestPlaneCosts(x, y) = bestPlaneCosts(x, y);
-      bestPlaneCosts(x, y) = newCosts(x, y);
-      bestPlanes(x, y) = currPlaneIndex;
-    } else if (newCosts(x, y) <= secondBestPlaneCosts(x, y)) {
-      secondBestPlaneCosts(x, y) = newCosts(x, y);
+    if (newCosts(x, y) <= dev_best_plane.best_costs(x, y)) {
+      dev_best_plane.second_best_costs(x, y) = dev_best_plane.best_costs(x, y);
+      dev_best_plane.best_costs(x, y) = newCosts(x, y);
+      dev_best_plane.best_plane_idx(x, y) = currPlaneIndex;
+    } else if (newCosts(x, y) <= dev_best_plane.second_best_costs(x, y)) {
+      dev_best_plane.second_best_costs(x, y) = newCosts(x, y);
     }
   }
 }
 
-void planeSweepUpdateBestAndSecondBestPlane(
-    const DeviceBuffer<float> &newCosts, int width, int height,
-    int currPlaneIndex, DeviceBuffer<float> &bestPlaneCosts,
-    DeviceBuffer<float> &secondBestPlaneCosts, DeviceBuffer<int> &bestPlanes) {
+void planeSweepUpdateBestAndSecondBestPlane(const DeviceBuffer<float> &newCosts,
+                                            int width, int height,
+                                            int currPlaneIndex,
+                                            BestPlaneBuffer &dev_best_plane) {
   dim3 gridDim(getNumTiles(width, PLANE_SWEEP_TILE_WIDTH),
                getNumTiles(height, PLANE_SWEEP_TILE_HEIGHT));
   dim3 blockDim(PLANE_SWEEP_TILE_WIDTH, PLANE_SWEEP_TILE_HEIGHT);
 
   planeSweepUpdateBestAndSecondBestPlaneKernel<<<gridDim, blockDim>>>(
-      newCosts, currPlaneIndex, bestPlaneCosts, secondBestPlaneCosts,
-      bestPlanes);
+      newCosts, currPlaneIndex, dev_best_plane);
   PSL_CUDA_CHECK_ERROR
 }
 
 __global__ void planeSweepUpdateBestAndSecondBestPlaneSubPixelKernel(
     DeviceBuffer<float> currCosts, DeviceBuffer<float> prev1,
-    DeviceBuffer<float> prev2, int prevPlaneIdx,
-    DeviceBuffer<float> bestPlaneCosts,
-    DeviceBuffer<float> secondBestPlaneCosts, DeviceBuffer<int> bestPlanes,
+    DeviceBuffer<float> prev2, int prevPlaneIdx, BestPlaneBuffer dev_best_plane,
     DeviceBuffer<float> subPixelPlaneOffsets) {
   // get position of outupt
   unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -997,7 +998,7 @@ __global__ void planeSweepUpdateBestAndSecondBestPlaneSubPixelKernel(
 
   if (x < currCosts.getWidth() && y < currCosts.getHeight()) {
     // we only comput the parabola if we found a new minimal cost
-    if (prev1(x, y) <= bestPlaneCosts(x, y)) {
+    if (prev1(x, y) <= dev_best_plane.best_costs(x, y)) {
       // parabola
       const float denom = currCosts(x, y) + prev2(x, y) - 2 * prev1(x, y);
       float offset = 0.0f;
@@ -1005,12 +1006,12 @@ __global__ void planeSweepUpdateBestAndSecondBestPlaneSubPixelKernel(
         offset = (prev2(x, y) - prev1(x, y)) / denom - 0.5f;
       }
 
-      bestPlanes(x, y) = prevPlaneIdx;
+      dev_best_plane.best_plane_idx(x, y) = prevPlaneIdx;
       subPixelPlaneOffsets(x, y) = offset;
-      bestPlaneCosts(x, y) = prev1(
+      dev_best_plane.best_costs(x, y) = prev1(
           x, y); // we use the actual cost of the minimal plane for robustnes
-    } else if (prev1(x, y) <= secondBestPlaneCosts(x, y)) {
-      secondBestPlaneCosts(x, y) = prev1(x, y);
+    } else if (prev1(x, y) <= dev_best_plane.second_best_costs(x, y)) {
+      dev_best_plane.second_best_costs(x, y) = prev1(x, y);
     }
   }
 }
@@ -1018,9 +1019,7 @@ __global__ void planeSweepUpdateBestAndSecondBestPlaneSubPixelKernel(
 void planeSweepUpdateBestAndSecondBestPlaneSubPixel(
     const DeviceBuffer<float> &currCosts, const DeviceBuffer<float> &prev1,
     const DeviceBuffer<float> &prev2, int width, int height, int prevPlaneIdx,
-    DeviceBuffer<float> &bestPlaneCosts,
-    DeviceBuffer<float> &secondBestPlaneCosts, DeviceBuffer<int> &bestPlanes,
-    DeviceBuffer<float> &subPixelPlaneOffsets)
+    BestPlaneBuffer &dev_best_plane, DeviceBuffer<float> &subPixelPlaneOffsets)
 
 {
   dim3 gridDim(getNumTiles(width, PLANE_SWEEP_TILE_WIDTH),
@@ -1028,8 +1027,8 @@ void planeSweepUpdateBestAndSecondBestPlaneSubPixel(
   dim3 blockDim(PLANE_SWEEP_TILE_WIDTH, PLANE_SWEEP_TILE_HEIGHT);
 
   planeSweepUpdateBestAndSecondBestPlaneSubPixelKernel<<<gridDim, blockDim>>>(
-      currCosts, prev1, prev2, prevPlaneIdx, bestPlaneCosts,
-      secondBestPlaneCosts, bestPlanes, subPixelPlaneOffsets);
+      currCosts, prev1, prev2, prevPlaneIdx, dev_best_plane,
+      subPixelPlaneOffsets);
   PSL_CUDA_CHECK_ERROR
 }
 

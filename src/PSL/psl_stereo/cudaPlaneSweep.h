@@ -18,18 +18,23 @@
 #ifndef CUDAPLANESWEEP_H
 #define CUDAPLANESWEEP_H
 
+// System
+#include <map>
+#include <vector>
+
+// PSL
+#include "cudaPlaneSweepContainer.h"
 #include <psl_base/cameraMatrix.h>
 #include <psl_base/depthMap.h>
 #include <psl_base/grid.h>
 #include <psl_cudaBase/deviceBuffer.h>
 #include <psl_cudaBase/deviceImage.h>
 
-#include <map>
-#include <vector>
-
-#include <opencv2/core/core.hpp>
-
+// Eigen
 #include <Eigen/Dense>
+
+// OpenCV
+#include <opencv2/core/core.hpp>
 
 using std::map;
 using std::vector;
@@ -77,23 +82,19 @@ void planeSweepAccumCostBestK(DeviceBuffer<float> &costAccumBuf,
                               float accumScale);
 void planeSweepUpdateBestPlane(const DeviceBuffer<float> &newCosts, int width,
                                int height, int currPlaneIndex,
-                               DeviceBuffer<float> &bestPlaneCosts,
-                               DeviceBuffer<int> &bestPlanes);
+                               BestPlaneBuffer &dev_best_plane);
 void planeSweepUpdateBestPlaneSubPixel(
     const DeviceBuffer<float> &currCosts, const DeviceBuffer<float> &prev1,
     const DeviceBuffer<float> &prev2, int width, int height, int prevPlaneIdx,
-    DeviceBuffer<float> &bestPlaneCosts, DeviceBuffer<int> &bestPlanes,
-    DeviceBuffer<float> &subPixelPlaneOffsets);
-void planeSweepUpdateBestAndSecondBestPlane(
-    const DeviceBuffer<float> &newCosts, int width, int height,
-    int currPlaneIndex, DeviceBuffer<float> &bestPlaneCosts,
-    DeviceBuffer<float> &secondBestPlaneCosts, DeviceBuffer<int> &bestPlanes);
+    BestPlaneBuffer &dev_best_plane, DeviceBuffer<float> &subPixelPlaneOffsets);
+void planeSweepUpdateBestAndSecondBestPlane(const DeviceBuffer<float> &newCosts,
+                                            int width, int height,
+                                            int currPlaneIndex,
+                                            BestPlaneBuffer &dev_best_plane);
 void planeSweepUpdateBestAndSecondBestPlaneSubPixel(
     const DeviceBuffer<float> &currCosts, const DeviceBuffer<float> &prev1,
     const DeviceBuffer<float> &prev2, int width, int height, int prevPlaneIdx,
-    DeviceBuffer<float> &bestPlaneCosts,
-    DeviceBuffer<float> &secondBestPlaneCosts, DeviceBuffer<int> &bestPlanes,
-    DeviceBuffer<float> &subPixelPlaneOffsets);
+    BestPlaneBuffer &best_plane, DeviceBuffer<float> &subPixelPlaneOffsets);
 void planeSweepMinFloat(DeviceBuffer<float> &buf1, DeviceBuffer<float> &buf2,
                         DeviceBuffer<float> &minBuf);
 void computeUniquenessRatio(DeviceBuffer<float> &bestCost,
@@ -201,18 +202,15 @@ private:
                                          const Eigen::Vector4d &plane,
                                          const double accum_scale0,
                                          const double accum_scale1);
-
   void AccumulateCostWithOcclusionNone(const Eigen::Vector4d &plane,
                                        const int ref_img_idx,
                                        const double accum_scale0,
                                        PSL::CudaPlaneSweepImage &matched_img,
                                        PSL::CudaPlaneSweepImage &refImg);
-
   void AccumulateCostWithOcclusionBestK(const Eigen::Vector4d &plane,
                                         const int img_cnt,
                                         PSL::CudaPlaneSweepImage &matched_img,
                                         PSL::CudaPlaneSweepImage &refImg);
-
   void AccumulateCostWithOcculusionRefSplit(
       const Eigen::Vector4d &plane, const int ref_img_idx,
       const int matched_img_idx, const double accum_scale0,
@@ -232,9 +230,6 @@ private:
 
   // COmpute uniqueness ratio.
   void ComputeUniquenessRatio();
-
-  // Plane sweeping.
-  void ProcessWithOcculusionNone(int ref_img_idx, Grid<Vector4d> &planes);
 
   // GPU Download
   void DownloadBestCost();
@@ -292,17 +287,13 @@ private:
   Grid<Vector4d> planes;
   CameraMatrix<double> refImgCam;
 
-  //        CudaPlaneSweepImage warpingBuffer;
-  //        CudaPlaneSweepFloatBuffer costBuffer;
   PSL_CUDA::DeviceBuffer<float> costAccumBuffer;
   PSL_CUDA::DeviceBuffer<float> subPixelCostAccumBufferPrev1;
   PSL_CUDA::DeviceBuffer<float> subPixelCostAccumBufferPrev2;
   PSL_CUDA::DeviceBuffer<float> subPixelPlaneOffsetsBuffer;
-  //        CudaPlaneSweepFloatBuffer costAccumBuffer;
   PSL_CUDA::DeviceBuffer<float> boxFilterTempBuffer;
-  PSL_CUDA::DeviceBuffer<int> bestPlaneBuffer;
-  PSL_CUDA::DeviceBuffer<float> bestPlaneCostBuffer;
-  PSL_CUDA::DeviceBuffer<float> secondBestPlaneCostBuffer;
+
+  PSL_CUDA::BestPlaneBuffer dev_best_plane_buffer;
   vector<PSL_CUDA::DeviceBuffer<float>> costBuffers;
 
   // Buffers for best K
