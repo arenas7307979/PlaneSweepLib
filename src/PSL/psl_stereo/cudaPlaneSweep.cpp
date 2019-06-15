@@ -218,30 +218,13 @@ double CudaPlaneSweep::largestBaseline(const CudaPlaneSweepImage &refImg) {
   return lBaseline;
 }
 
-void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
-  int numPlanes = planes.getWidth();
-  CHECK(matchWindowHeight > 0 && matchWindowWidth > 0 && numPlanes > 0)
-      << "Parameters are not set properly";
-
-  CudaPlaneSweepImage refImg;
-  CHECK(images.count(ref_img_idx) == 1) << "Image with ID " << ref_img_idx
-                                        << " does not exist.";
-  refImg = images[ref_img_idx];
-  refImgCam = refImg.cam;
+void CudaPlaneSweep::PrepareCommonBuffer(const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
 
   if (outputCostVolumeEnabled) {
     costVolume = Grid<float>(refImg.devImg.getWidth(),
                              refImg.devImg.getHeight(), numPlanes);
   }
-
-  // allocate the warping buffer on the gpu
-  //    planeSweepCreateImage(refImg.w, refImg.h, colorMatchingEnabled,
-  //    this->warpingBuffer.imgAddr, this->warpingBuffer.pitch);
-
-  // allocate the costs buffer on the gpu
-  //    planeSweepCreateCostBuffer(refImg.w, refImg.h, this->costBuffer.addr,
-  //    this->costBuffer.pitch);
-
   // allocate a cost buffer to store the results of the first box filter pass
   boxFilterTempBuffer.reallocatePitched(refImg.devImg.getWidth(),
                                         refImg.devImg.getHeight());
@@ -249,8 +232,6 @@ void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
   // allocate the cost accum buffer on the gpu
   costAccumBuffer.reallocatePitched(refImg.devImg.getWidth(),
                                     refImg.devImg.getHeight());
-  //    planeSweepCreateFloatBuffer(refImg.w, refImg.h,
-  //    this->costAccumBuffer.addr, this->costAccumBuffer.pitch);
 
   if (subPixelEnabled) {
     subPixelCostAccumBufferPrev1.reallocatePitched(refImg.devImg.getWidth(),
@@ -284,33 +265,265 @@ void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
     // initialize to big value
     bestPlaneCostBuffer.clear(1e6);
   }
+}
 
-  if (occlusionMode == PLANE_SWEEP_OCCLUSION_BEST_K) {
-    // allocate buffers for the matching costs
-    costBuffers.resize(images.size() - 1);
-    for (unsigned int i = 0; i < costBuffers.size(); i++) {
-      costBuffers[i].reallocatePitched(refImg.devImg.getWidth(),
-                                       refImg.devImg.getHeight());
-    }
-
-    // allocate buffers to find the best K
-    bestKBuffer0.reallocatePitched(refImg.devImg.getWidth(),
-                                   refImg.devImg.getHeight());
-    bestKBuffer1.reallocatePitched(refImg.devImg.getWidth(),
-                                   refImg.devImg.getHeight());
-  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
-    // allocate buffers for accumulated matching costs
-    costAccumBeforeBuffer.reallocatePitched(refImg.devImg.getWidth(),
+void CudaPlaneSweep::PrepareZNCCBuffer(const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
+  // the matching cost is NCC so we need to allocate some more buffers
+  refImgBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                          refImg.devImg.getHeight());
+  otherImgBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
                                             refImg.devImg.getHeight());
-    costAccumAfterBuffer.reallocatePitched(refImg.devImg.getWidth(),
+  refImgSqrBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                             refImg.devImg.getHeight());
+  otherImgSqrBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                               refImg.devImg.getHeight());
+  imgProdBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
                                            refImg.devImg.getHeight());
+  boxFilterSqrTempBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                           refImg.devImg.getHeight());
+  boxFilterProdTempBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                            refImg.devImg.getHeight());
+
+  // the box filtering only dependant on the reference image can be done only
+  // once before entering the main loop
+  planeSweepBoxFilterImageAndSqrImage(refImg.devImg, refImgBoxFilterBuffer,
+                                      refImgSqrBoxFilterBuffer,
+                                      matchWindowRadiusX, matchWindowRadiusY);
+}
+
+void CudaPlaneSweep::AccumulateCostWithOcclusionNone(
+    const Eigen::Vector4d &plane, const int ref_img_idx,
+    const double accum_scale0, PSL::CudaPlaneSweepImage &matched_img,
+    PSL::CudaPlaneSweepImage &refImg) {
+
+  /*
+    // Cost accumulation from each reference images.
+    for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
+         it != images.end(); it++) {
+      if (it->first == ref_img_idx) {
+        continue;
+      }
+  */
+  // match the image
+  float H[9];
+  ComputeHomographyFromReferenceImage(plane, refImg.cam, matched_img.cam, H);
+
+  switch (matchingCosts) {
+  case PLANE_SWEEP_SAD: {
+    planeSweepWarpADAccum(matched_img.devImg, colorMatchingEnabled, H,
+                          refImg.devImg, (float)accum_scale0, costAccumBuffer);
+  } break;
+  case PLANE_SWEEP_ZNCC: {
+    planeSweepWarpZNCCAccum(matched_img.devImg, H, refImg.devImg,
+                            refImgBoxFilterBuffer, refImgSqrBoxFilterBuffer,
+                            (float)accum_scale0, costAccumBuffer,
+                            matchWindowRadiusX, matchWindowRadiusY);
+  } break;
+  }
+  //  }
+}
+
+void CudaPlaneSweep::ApplyBoxFilterForAccumulatedCost() {
+  planeSweepBoxFilterCosts(costAccumBuffer, boxFilterTempBuffer,
+                           matchWindowRadiusX, matchWindowRadiusY);
+  DeviceBuffer<float> temp = boxFilterTempBuffer;
+  boxFilterTempBuffer = costAccumBuffer; // swap buffers
+  costAccumBuffer = temp;
+}
+
+void CudaPlaneSweep::UpdateBestPlane(const int plane_idx,
+                                     const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
+
+  // Compute subpixel for THIS plane.
+  if (subPixelEnabled && plane_idx >= 2) {
+    if (outputBestDepthEnabled || outputUniquenessRatioEnabled) {
+      if (outputUniquenessRatioEnabled) {
+        planeSweepUpdateBestAndSecondBestPlaneSubPixel(
+            costAccumBuffer, subPixelCostAccumBufferPrev1,
+            subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
+            refImg.devImg.getHeight(), plane_idx - 1, bestPlaneCostBuffer,
+            secondBestPlaneCostBuffer, bestPlaneBuffer,
+            subPixelPlaneOffsetsBuffer);
+      } else {
+        planeSweepUpdateBestPlaneSubPixel(
+            costAccumBuffer, subPixelCostAccumBufferPrev1,
+            subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
+            refImg.devImg.getHeight(), plane_idx - 1, bestPlaneCostBuffer,
+            bestPlaneBuffer, subPixelPlaneOffsetsBuffer);
+      }
+    }
   }
 
-  double accumScale0 = 0, accumScale1 = 0;
+  if (!subPixelEnabled || (plane_idx == 0 || plane_idx == numPlanes - 1)) {
+    if (outputBestDepthEnabled || outputUniquenessRatioEnabled) {
+      if (outputUniquenessRatioEnabled) {
+        planeSweepUpdateBestAndSecondBestPlane(
+            costAccumBuffer, refImg.devImg.getWidth(),
+            refImg.devImg.getHeight(), plane_idx, bestPlaneCostBuffer,
+            secondBestPlaneCostBuffer, bestPlaneBuffer);
 
-  if (occlusionMode == PLANE_SWEEP_OCCLUSION_NONE) {
-    accumScale0 = (double)1 / (double)(images.size() - 1);
-  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
+      } else {
+        planeSweepUpdateBestPlane(costAccumBuffer, refImg.devImg.getWidth(),
+                                  refImg.devImg.getHeight(), plane_idx,
+                                  bestPlaneCostBuffer, bestPlaneBuffer);
+      }
+    }
+  }
+
+  if (subPixelEnabled) {
+    // rotate buffers
+    PSL_CUDA::DeviceBuffer<float> temp = subPixelCostAccumBufferPrev2;
+    subPixelCostAccumBufferPrev2 = subPixelCostAccumBufferPrev1;
+    subPixelCostAccumBufferPrev1 = costAccumBuffer;
+    costAccumBuffer = temp;
+  }
+}
+
+void CudaPlaneSweep::ComputeBestDepth(const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
+  // store planes in a vector to upload them to gpu
+  vector<float> planesVec;
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < numPlanes; i++) {
+      planesVec.push_back((float)planes(i, 0)(j));
+    }
+  }
+
+  // get inverse ref camera matrix
+  Matrix<double, 3, 3> KrefInv = refImg.cam.getK().inverse();
+  vector<float> KrefInvVec;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      KrefInvVec.push_back((float)KrefInv(i, j));
+    }
+  }
+
+  bestDepth = DepthMap<float, double>(refImg.devImg.getWidth(),
+                                      refImg.devImg.getHeight(), refImg.cam);
+
+  // Compute best depth.
+  if (subPixelEnabled) {
+    switch (subPixelInterpMode) {
+    case PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE:
+      planeSweepComputeBestDepthsSubPixelInverse(
+          bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
+          bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
+          KrefInvVec);
+      break;
+    case PLANE_SWEEP_SUB_PIXEL_INTERP_DIRECT:
+      planeSweepComputeBestDepthsSubPixelDirect(
+          bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
+          bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
+          KrefInvVec);
+      break;
+    }
+  } else {
+    planeSweepComputeBestDepths(
+        bestPlaneBuffer, numPlanes, planesVec, bestDepth.getDataPtr(),
+        bestDepth.getWidth() * sizeof(float), KrefInvVec);
+  }
+}
+
+void CudaPlaneSweep::ComputeUniquenessRatio() {
+  computeUniquenessRatio(bestPlaneCostBuffer, secondBestPlaneCostBuffer,
+                         secondBestPlaneCostBuffer);
+  uniqunessRatios = Grid<float>(bestPlaneCostBuffer.getWidth(),
+                                bestPlaneCostBuffer.getHeight());
+  secondBestPlaneCostBuffer.download(
+      uniqunessRatios.getDataPtr(), uniqunessRatios.getWidth() * sizeof(float));
+}
+
+void CudaPlaneSweep::DownloadBestCost() {
+  bestCosts = Grid<float>(bestPlaneCostBuffer.getWidth(),
+                          bestPlaneCostBuffer.getHeight());
+  bestPlaneCostBuffer.download(bestCosts.getDataPtr(),
+                               bestCosts.getWidth() * sizeof(float));
+}
+
+void CudaPlaneSweep::PrepareOcclusionBestKBuffer(const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
+  // allocate buffers for the matching costs
+  costBuffers.resize(images.size() - 1);
+  for (unsigned int i = 0; i < costBuffers.size(); i++) {
+    costBuffers[i].reallocatePitched(refImg.devImg.getWidth(),
+                                     refImg.devImg.getHeight());
+  }
+
+  // allocate buffers to find the best K
+  bestKBuffer0.reallocatePitched(refImg.devImg.getWidth(),
+                                 refImg.devImg.getHeight());
+  bestKBuffer1.reallocatePitched(refImg.devImg.getWidth(),
+                                 refImg.devImg.getHeight());
+}
+
+void CudaPlaneSweep::PrepareOcclusionRefSplitBuffer(const int ref_img_idx) {
+  PSL::CudaPlaneSweepImage &refImg = images[ref_img_idx];
+
+  // allocate buffers for accumulated matching costs
+  costAccumBeforeBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                          refImg.devImg.getHeight());
+  costAccumAfterBuffer.reallocatePitched(refImg.devImg.getWidth(),
+                                         refImg.devImg.getHeight());
+}
+
+void CudaPlaneSweep::AccumulateCostWithOcclusionBestK(
+    const Eigen::Vector4d &plane, const int img_cnt,
+    PSL::CudaPlaneSweepImage &matched_img, PSL::CudaPlaneSweepImage &refImg) {
+  matchImage(refImg, matched_img, plane, costBuffers[img_cnt]);
+
+  if (boxFilterBeforeOcclusion && matchingCosts != PLANE_SWEEP_ZNCC) {
+    planeSweepBoxFilterCosts(costBuffers[img_cnt], boxFilterTempBuffer,
+                             matchWindowRadiusX, matchWindowRadiusY);
+    DeviceBuffer<float> temp = boxFilterTempBuffer;
+    boxFilterTempBuffer = costBuffers[img_cnt]; // swap buffers
+    costBuffers[img_cnt] = temp;
+  }
+}
+
+void CudaPlaneSweep::AccumulateCostWithOcculusionRefSplit(
+    const Eigen::Vector4d &plane, const int ref_img_idx,
+    const int matched_img_idx, const double accum_scale0,
+    const double accum_scale1, PSL::CudaPlaneSweepImage &matched_img,
+    PSL::CudaPlaneSweepImage &refImg) {
+
+  float H[9];
+  ComputeHomographyFromReferenceImage(plane, refImg.cam, matched_img.cam, H);
+
+  float accum_scale;
+  PSL_CUDA::DeviceBuffer<float> *accum_buffer;
+  if (matched_img_idx < ref_img_idx) {
+    accum_scale = accum_scale0;
+    accum_buffer = &costAccumBeforeBuffer;
+  } else {
+    accum_scale = accum_scale1;
+    accum_buffer = &costAccumAfterBuffer;
+  }
+
+  switch (matchingCosts) {
+  case PLANE_SWEEP_SAD:
+    planeSweepWarpADAccum(matched_img.devImg, colorMatchingEnabled, H,
+                          refImg.devImg, accum_scale, *accum_buffer);
+    break;
+  case PLANE_SWEEP_ZNCC:
+    planeSweepWarpZNCCAccum(matched_img.devImg, H, refImg.devImg,
+                            refImgBoxFilterBuffer, refImgSqrBoxFilterBuffer,
+                            accum_scale, *accum_buffer, matchWindowRadiusX,
+                            matchWindowRadiusY);
+    break;
+  }
+}
+
+void CudaPlaneSweep::ComputeAccumulationScales(const int ref_img_idx,
+                                               double &accum_scale0,
+                                               double &accum_scale1) {
+  switch (occlusionMode) {
+  case PLANE_SWEEP_OCCLUSION_NONE: {
+    accum_scale0 = (double)1 / (double)(images.size() - 1);
+    accum_scale1 = 0.0;
+  } break;
+  case PLANE_SWEEP_OCCLUSION_REF_SPLIT: {
     int numBefore = 0;
     int numAfter = 0;
     for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
@@ -325,287 +538,168 @@ void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
         << "Reference Image cannot be at the border of the sequence with "
            "PLANE_SWEEP_OCCLUSION_REF_SPLIT";
 
-    accumScale0 = (double)1 / (double)numBefore;
-    accumScale1 = (double)1 / (double)numAfter;
-  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_BEST_K) {
-    accumScale0 = (double)1 / (double)occlusionBestK;
+    accum_scale0 = (double)1 / (double)numBefore;
+    accum_scale1 = (double)1 / (double)numAfter;
+  } break;
+  case PLANE_SWEEP_OCCLUSION_BEST_K: {
+    accum_scale0 = (double)1 / (double)occlusionBestK;
+    accum_scale1 = 0.0;
+  } break;
+  }
+}
+
+void CudaPlaneSweep::UpdateCostAccumulationBuffer(const double accum_scale0) {
+  if (occlusionMode == PLANE_SWEEP_OCCLUSION_BEST_K) {
+    // accumulate the best K
+    DeviceBuffer<float> best = bestKBuffer0;
+    DeviceBuffer<float> bestMin = bestKBuffer1;
+
+    const float bestMax = 1e6;
+
+    costAccumBuffer.clear(0);
+    best.clear(bestMax);
+    bestMin.clear(0);
+
+    for (int k = 0; k < this->occlusionBestK; k++) {
+      for (unsigned int j = 0; j < costBuffers.size(); j++) {
+        updateBestK(costBuffers[j], best, bestMin);
+      }
+
+      // accumulate best
+      planeSweepAccumCostBestK(costAccumBuffer, best, bestMin, bestMax,
+                               (float)accum_scale0);
+
+      // swap buffers
+      DeviceBuffer<float> temp = bestMin;
+      bestMin = best;
+      best = temp;
+      best.clear(bestMax);
+    }
+  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
+    if (boxFilterBeforeOcclusion && matchingCosts != PLANE_SWEEP_ZNCC) {
+      planeSweepBoxFilterCosts(costAccumBeforeBuffer, boxFilterTempBuffer,
+                               matchWindowRadiusX, matchWindowRadiusY);
+      DeviceBuffer<float> temp = boxFilterTempBuffer;
+      boxFilterTempBuffer = costAccumBeforeBuffer;
+      costAccumBeforeBuffer = temp;
+      planeSweepBoxFilterCosts(costAccumAfterBuffer, boxFilterTempBuffer,
+                               matchWindowRadiusX, matchWindowRadiusY);
+      temp = boxFilterTempBuffer;
+      boxFilterTempBuffer = costAccumAfterBuffer;
+      costAccumAfterBuffer = temp;
+    }
+
+    // take the minimum of the two buffers
+    planeSweepMinFloat(costAccumBeforeBuffer, costAccumAfterBuffer,
+                       costAccumBuffer);
+  }
+}
+
+void CudaPlaneSweep::AccumulateCostForEachSourceImages(
+    const int ref_img_idx, const Eigen::Vector4d &plane,
+    const double accum_scale0, const double accum_scale1) {
+  PSL::CudaPlaneSweepImage &ref_img = images[ref_img_idx];
+  int img_cnt = 0;
+  for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
+       it != images.end(); it++) {
+    if (it->first == ref_img_idx) {
+      continue;
+    }
+
+    // match the image
+    switch (occlusionMode) {
+    case PLANE_SWEEP_OCCLUSION_NONE: {
+      AccumulateCostWithOcclusionNone(plane, ref_img_idx, accum_scale0,
+                                      it->second, ref_img);
+    } break;
+    case PLANE_SWEEP_OCCLUSION_BEST_K: {
+      AccumulateCostWithOcclusionBestK(plane, img_cnt, it->second, ref_img);
+    } break;
+    case PLANE_SWEEP_OCCLUSION_REF_SPLIT: {
+      AccumulateCostWithOcculusionRefSplit(plane, ref_img_idx, it->first,
+                                           accum_scale0, accum_scale1,
+                                           it->second, ref_img);
+    } break;
+    }
+    img_cnt++;
+  }
+
+  // Post processing of the buffer.
+  UpdateCostAccumulationBuffer(accum_scale0);
+}
+
+void CudaPlaneSweep::PrepareBuffer(const int ref_img_idx) {
+  PrepareCommonBuffer(ref_img_idx);
+
+  if (occlusionMode == PLANE_SWEEP_OCCLUSION_BEST_K) {
+    PrepareOcclusionBestKBuffer(ref_img_idx);
+  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
+    PrepareOcclusionRefSplitBuffer(ref_img_idx);
   }
 
   if (matchingCosts == PLANE_SWEEP_ZNCC) {
-    // the matching cost is NCC so we need to allocate some more buffers
-    refImgBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                            refImg.devImg.getHeight());
-    otherImgBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                              refImg.devImg.getHeight());
-    refImgSqrBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                               refImg.devImg.getHeight());
-    otherImgSqrBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                                 refImg.devImg.getHeight());
-    imgProdBoxFilterBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                             refImg.devImg.getHeight());
-    boxFilterSqrTempBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                             refImg.devImg.getHeight());
-    boxFilterProdTempBuffer.reallocatePitched(refImg.devImg.getWidth(),
-                                              refImg.devImg.getHeight());
-
-    // the box filtering only dependant on the reference image can be done only
-    // once before entering the main loop
-    planeSweepBoxFilterImageAndSqrImage(refImg.devImg, refImgBoxFilterBuffer,
-                                        refImgSqrBoxFilterBuffer,
-                                        matchWindowRadiusX, matchWindowRadiusY);
+    PrepareZNCCBuffer(ref_img_idx);
   }
+}
 
+void CudaPlaneSweep::ClearCostAccumulationBuffer() {
+  if (occlusionMode == PLANE_SWEEP_OCCLUSION_NONE) {
+    costAccumBuffer.clear(0);
+  } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
+    costAccumBeforeBuffer.clear(0);
+    costAccumAfterBuffer.clear(0);
+  }
+}
+
+void CudaPlaneSweep::process(int ref_img_idx, Grid<Vector4d> &planes) {
+
+  int numPlanes = planes.getWidth();
+  CHECK(matchWindowHeight > 0 && matchWindowWidth > 0 && numPlanes > 0)
+      << "Parameters are not set properly";
+  CHECK(images.count(ref_img_idx) == 1) << "Image with ID " << ref_img_idx
+                                        << " does not exist.";
+
+  // Prepare cuda buffer.
+  PrepareBuffer(ref_img_idx);
+
+  // Comopute accumulation scales.
+  double accumScale0 = 0, accumScale1 = 0;
+  ComputeAccumulationScales(ref_img_idx, accumScale0, accumScale1);
   // Loop for plane.
-  for (int i = 0; i < numPlanes; i++) {
+  for (int plane_idx = 0; plane_idx < numPlanes; plane_idx++) {
 
-    if (occlusionMode == PLANE_SWEEP_OCCLUSION_NONE) {
-      costAccumBuffer.clear(0);
-    } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
-      costAccumBeforeBuffer.clear(0);
-      costAccumAfterBuffer.clear(0);
-    }
+    // Clera cuda buffer for next plane calculation.
+    ClearCostAccumulationBuffer();
 
-    int j = 0;
-    for (map<int, CudaPlaneSweepImage>::iterator it = images.begin();
-         it != images.end(); it++) {
-      if (it->first == ref_img_idx) {
-        continue;
-      }
-
-      // match the image
-      switch (occlusionMode) {
-      case PLANE_SWEEP_OCCLUSION_NONE: {
-        float H[9];
-        ComputeHomographyFromReferenceImage(planes(i, 0), refImg.cam,
-                                            it->second.cam, H);
-
-        switch (matchingCosts) {
-        case PLANE_SWEEP_SAD:
-          planeSweepWarpADAccum(it->second.devImg, colorMatchingEnabled, H,
-                                refImg.devImg, (float)accumScale0,
-                                costAccumBuffer);
-          break;
-        case PLANE_SWEEP_ZNCC:
-          planeSweepWarpZNCCAccum(
-              it->second.devImg, H, refImg.devImg, refImgBoxFilterBuffer,
-              refImgSqrBoxFilterBuffer, (float)accumScale0, costAccumBuffer,
-              matchWindowRadiusX, matchWindowRadiusY);
-          break;
-        }
-        break;
-      }
-      case PLANE_SWEEP_OCCLUSION_BEST_K: {
-        matchImage(refImg, it->second, planes(i, 0), costBuffers[j]);
-        if (boxFilterBeforeOcclusion && matchingCosts != PLANE_SWEEP_ZNCC) {
-          planeSweepBoxFilterCosts(costBuffers[j], boxFilterTempBuffer,
-                                   matchWindowRadiusX, matchWindowRadiusY);
-          DeviceBuffer<float> temp = boxFilterTempBuffer;
-          boxFilterTempBuffer = costBuffers[j]; // swap buffers
-          costBuffers[j] = temp;
-        }
-        break;
-      }
-      case PLANE_SWEEP_OCCLUSION_REF_SPLIT: {
-        float H[9];
-        ComputeHomographyFromReferenceImage(planes(i, 0), refImg.cam,
-                                            it->second.cam, H);
-
-        switch (matchingCosts) {
-        case PLANE_SWEEP_SAD:
-          if (it->first < ref_img_idx) {
-            planeSweepWarpADAccum(it->second.devImg, colorMatchingEnabled, H,
-                                  refImg.devImg, (float)accumScale0,
-                                  costAccumBeforeBuffer);
-          } else {
-            planeSweepWarpADAccum(it->second.devImg, colorMatchingEnabled, H,
-                                  refImg.devImg, (float)accumScale1,
-                                  costAccumAfterBuffer);
-          }
-          break;
-        case PLANE_SWEEP_ZNCC:
-          if (it->first < ref_img_idx) {
-            planeSweepWarpZNCCAccum(
-                it->second.devImg, H, refImg.devImg, refImgBoxFilterBuffer,
-                refImgSqrBoxFilterBuffer, (float)accumScale0,
-                costAccumBeforeBuffer, matchWindowRadiusX, matchWindowRadiusY);
-          } else {
-            planeSweepWarpZNCCAccum(
-                it->second.devImg, H, refImg.devImg, refImgBoxFilterBuffer,
-                refImgSqrBoxFilterBuffer, (float)accumScale1,
-                costAccumAfterBuffer, matchWindowRadiusX, matchWindowRadiusY);
-          }
-          break;
-        }
-
-        break;
-      }
-      }
-      j++;
-    }
-
-    if (occlusionMode == PLANE_SWEEP_OCCLUSION_BEST_K) {
-      // accumulate the best K
-      DeviceBuffer<float> best = bestKBuffer0;
-      DeviceBuffer<float> bestMin = bestKBuffer1;
-
-      const float bestMax = 1e6;
-
-      costAccumBuffer.clear(0);
-      best.clear(bestMax);
-      bestMin.clear(0);
-
-      for (int k = 0; k < this->occlusionBestK; k++) {
-        for (unsigned int j = 0; j < costBuffers.size(); j++) {
-          updateBestK(costBuffers[j], best, bestMin);
-        }
-
-        // accumulate best
-        planeSweepAccumCostBestK(costAccumBuffer, best, bestMin, bestMax,
-                                 (float)accumScale0);
-
-        // swap buffers
-        DeviceBuffer<float> temp = bestMin;
-        bestMin = best;
-        best = temp;
-        best.clear(bestMax);
-      }
-    } else if (occlusionMode == PLANE_SWEEP_OCCLUSION_REF_SPLIT) {
-      if (boxFilterBeforeOcclusion && matchingCosts != PLANE_SWEEP_ZNCC) {
-        planeSweepBoxFilterCosts(costAccumBeforeBuffer, boxFilterTempBuffer,
-                                 matchWindowRadiusX, matchWindowRadiusY);
-        DeviceBuffer<float> temp = boxFilterTempBuffer;
-        boxFilterTempBuffer = costAccumBeforeBuffer;
-        costAccumBeforeBuffer = temp;
-        planeSweepBoxFilterCosts(costAccumAfterBuffer, boxFilterTempBuffer,
-                                 matchWindowRadiusX, matchWindowRadiusY);
-        temp = boxFilterTempBuffer;
-        boxFilterTempBuffer = costAccumAfterBuffer;
-        costAccumAfterBuffer = temp;
-      }
-
-      // take the minimum of the two buffers
-      planeSweepMinFloat(costAccumBeforeBuffer, costAccumAfterBuffer,
-                         costAccumBuffer);
-    }
+    // Calculate cost Reference image VS Source image.
+    AccumulateCostForEachSourceImages(ref_img_idx, planes(plane_idx, 0),
+                                      accumScale0, accumScale1);
 
     // box filter
     if ((occlusionMode == PLANE_SWEEP_OCCLUSION_NONE ||
          !boxFilterBeforeOcclusion) &&
         matchingCosts != PLANE_SWEEP_ZNCC) {
-      planeSweepBoxFilterCosts(costAccumBuffer, boxFilterTempBuffer,
-                               matchWindowRadiusX, matchWindowRadiusY);
-      DeviceBuffer<float> temp = boxFilterTempBuffer;
-      boxFilterTempBuffer = costAccumBuffer; // swap buffers
-      costAccumBuffer = temp;
+      ApplyBoxFilterForAccumulatedCost();
     }
 
     if (outputCostVolumeEnabled) {
-      costAccumBuffer.download((float *)&costVolume(0, 0, i),
+      costAccumBuffer.download((float *)&costVolume(0, 0, plane_idx),
                                costVolume.getWidth() * sizeof(float));
     }
 
-    if (subPixelEnabled && i >= 2) {
-      if (outputBestDepthEnabled || outputUniquenessRatioEnabled) {
-        if (outputUniquenessRatioEnabled) {
-          planeSweepUpdateBestAndSecondBestPlaneSubPixel(
-              costAccumBuffer, subPixelCostAccumBufferPrev1,
-              subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
-              refImg.devImg.getHeight(), i - 1, bestPlaneCostBuffer,
-              secondBestPlaneCostBuffer, bestPlaneBuffer,
-              subPixelPlaneOffsetsBuffer);
-        } else {
-          planeSweepUpdateBestPlaneSubPixel(
-              costAccumBuffer, subPixelCostAccumBufferPrev1,
-              subPixelCostAccumBufferPrev2, refImg.devImg.getWidth(),
-              refImg.devImg.getHeight(), i - 1, bestPlaneCostBuffer,
-              bestPlaneBuffer, subPixelPlaneOffsetsBuffer);
-        }
-      }
-    }
-
-    if (!subPixelEnabled || (i == 0 || i == numPlanes - 1)) {
-      if (outputBestDepthEnabled || outputUniquenessRatioEnabled) {
-        if (outputUniquenessRatioEnabled) {
-          planeSweepUpdateBestAndSecondBestPlane(
-              costAccumBuffer, refImg.devImg.getWidth(),
-              refImg.devImg.getHeight(), i, bestPlaneCostBuffer,
-              secondBestPlaneCostBuffer, bestPlaneBuffer);
-
-        } else {
-          planeSweepUpdateBestPlane(costAccumBuffer, refImg.devImg.getWidth(),
-                                    refImg.devImg.getHeight(), i,
-                                    bestPlaneCostBuffer, bestPlaneBuffer);
-        }
-      }
-    }
-
-    if (subPixelEnabled) {
-      // rotate buffers
-      PSL_CUDA::DeviceBuffer<float> temp = subPixelCostAccumBufferPrev2;
-      subPixelCostAccumBufferPrev2 = subPixelCostAccumBufferPrev1;
-      subPixelCostAccumBufferPrev1 = costAccumBuffer;
-      costAccumBuffer = temp;
-    }
+    UpdateBestPlane(plane_idx, ref_img_idx);
   }
 
   if (outputBestDepthEnabled) {
-    // store planes in a vector to upload them to gpu
-    vector<float> planesVec;
-    for (int j = 0; j < 4; j++) {
-      for (int i = 0; i < numPlanes; i++) {
-        planesVec.push_back((float)planes(i, 0)(j));
-      }
-    }
-
-    // get inverse ref camera matrix
-    Matrix<double, 3, 3> KrefInv = refImg.cam.getK().inverse();
-    vector<float> KrefInvVec;
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        KrefInvVec.push_back((float)KrefInv(i, j));
-      }
-    }
-
-    bestDepth = DepthMap<float, double>(refImg.devImg.getWidth(),
-                                        refImg.devImg.getHeight(), refImg.cam);
-
-    if (subPixelEnabled) {
-      switch (subPixelInterpMode) {
-      case PLANE_SWEEP_SUB_PIXEL_INTERP_INVERSE:
-        planeSweepComputeBestDepthsSubPixelInverse(
-            bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
-            bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
-            KrefInvVec);
-        break;
-      case PLANE_SWEEP_SUB_PIXEL_INTERP_DIRECT:
-        planeSweepComputeBestDepthsSubPixelDirect(
-            bestPlaneBuffer, subPixelPlaneOffsetsBuffer, numPlanes, planesVec,
-            bestDepth.getDataPtr(), bestDepth.getWidth() * sizeof(float),
-            KrefInvVec);
-        break;
-      }
-    } else {
-      planeSweepComputeBestDepths(
-          bestPlaneBuffer, numPlanes, planesVec, bestDepth.getDataPtr(),
-          bestDepth.getWidth() * sizeof(float), KrefInvVec);
-    }
+    ComputeBestDepth(ref_img_idx);
   }
 
   if (outputBestCostsEnabled) {
-    bestCosts = Grid<float>(bestPlaneCostBuffer.getWidth(),
-                            bestPlaneCostBuffer.getHeight());
-    bestPlaneCostBuffer.download(bestCosts.getDataPtr(),
-                                 bestCosts.getWidth() * sizeof(float));
+    DownloadBestCost();
   }
 
   if (outputUniquenessRatioEnabled) {
-    computeUniquenessRatio(bestPlaneCostBuffer, secondBestPlaneCostBuffer,
-                           secondBestPlaneCostBuffer);
-    uniqunessRatios = Grid<float>(bestPlaneCostBuffer.getWidth(),
-                                  bestPlaneCostBuffer.getHeight());
-    secondBestPlaneCostBuffer.download(uniqunessRatios.getDataPtr(),
-                                       uniqunessRatios.getWidth() *
-                                           sizeof(float));
+    ComputeUniquenessRatio();
   }
 }
 

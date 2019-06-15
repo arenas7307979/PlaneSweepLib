@@ -176,12 +176,69 @@ public:
 
   cv::Mat downloadImage(int id);
 
-  void process(int refImgId);
-  void process(int refImgId, Grid<Vector4d> &planes);
+  void process(int ref_img_idx);
+  void process(int ref_img_idx, Grid<Vector4d> &planes);
 
   void deallocateBuffers();
 
 private:
+  // Buffer preparation.
+  void PrepareBuffer(const int ref_img_idx);
+  void PrepareCommonBuffer(const int ref_img_idx);
+  void PrepareOcclusionBestKBuffer(const int ref_img_idx);
+  void PrepareOcclusionRefSplitBuffer(const int ref_img_idx);
+  void PrepareZNCCBuffer(const int ref_img_idx);
+
+  // Clear Buffer.
+  void ClearCostAccumulationBuffer();
+
+  // Compute accumulation scales.
+  void ComputeAccumulationScales(const int ref_img_idx, double &accum_scale0,
+                                 double &accum_scale1);
+
+  // Cost Accumulation Function.
+  void AccumulateCostForEachSourceImages(const int ref_img_idx,
+                                         const Eigen::Vector4d &plane,
+                                         const double accum_scale0,
+                                         const double accum_scale1);
+
+  void AccumulateCostWithOcclusionNone(const Eigen::Vector4d &plane,
+                                       const int ref_img_idx,
+                                       const double accum_scale0,
+                                       PSL::CudaPlaneSweepImage &matched_img,
+                                       PSL::CudaPlaneSweepImage &refImg);
+
+  void AccumulateCostWithOcclusionBestK(const Eigen::Vector4d &plane,
+                                        const int img_cnt,
+                                        PSL::CudaPlaneSweepImage &matched_img,
+                                        PSL::CudaPlaneSweepImage &refImg);
+
+  void AccumulateCostWithOcculusionRefSplit(
+      const Eigen::Vector4d &plane, const int ref_img_idx,
+      const int matched_img_idx, const double accum_scale0,
+      const double accum_scale1, PSL::CudaPlaneSweepImage &matched_img,
+      PSL::CudaPlaneSweepImage &refImg);
+
+  void UpdateCostAccumulationBuffer(const double accum_scale0);
+
+  // Filtering
+  void ApplyBoxFilterForAccumulatedCost();
+
+  // Update best plane.
+  void UpdateBestPlane(const int plane_idx, const int ref_img_idx);
+
+  // Compute best depth.
+  void ComputeBestDepth(const int ref_img_idx);
+
+  // COmpute uniqueness ratio.
+  void ComputeUniquenessRatio();
+
+  // Plane sweeping.
+  void ProcessWithOcculusionNone(int ref_img_idx, Grid<Vector4d> &planes);
+
+  // GPU Download
+  void DownloadBestCost();
+
   map<int, CudaPlaneSweepImage> images;
 
   int nextId;

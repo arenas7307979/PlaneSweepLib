@@ -483,7 +483,7 @@ int DebugTest(int argc, char *argv[]) {
         CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
     cPS.enableColorMatching(false);
 
-    int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+    int ref_img_id = UploadImageToDevice(image_file_paths, 25, cameras, cPS);
 
     // Use 5 gray images.
     {
@@ -512,7 +512,7 @@ int DebugTest(int argc, char *argv[]) {
 
       PinholePlaneSweepTest(
           PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
-          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 3,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 5,
           ref_img_id, minZ, maxZ, cPS, 0);
     }
   }
