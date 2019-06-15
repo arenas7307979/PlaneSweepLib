@@ -483,13 +483,36 @@ int DebugTest(int argc, char *argv[]) {
         CreateCudaPlaneSweepWithdDefaultConfigration(minZ, maxZ);
     cPS.enableColorMatching(false);
 
+    int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras, cPS);
+
     // Use 5 gray images.
     {
-      int ref_img_id = UploadImageToDevice(image_file_paths, 3, cameras, cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_SAD,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 0,
+          ref_img_id, minZ, maxZ, cPS, 100);
+    }
+
+    // Use 5 gray images.
+    {
+      // int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras,
+      // cPS);
 
       PinholePlaneSweepTest(
           PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
-          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_NONE, 0,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_REF_SPLIT, 0,
+          ref_img_id, minZ, maxZ, cPS, 100);
+    }
+
+    // Use 5 gray images.
+    {
+      // int ref_img_id = UploadImageToDevice(image_file_paths, 5, cameras,
+      // cPS);
+
+      PinholePlaneSweepTest(
+          PSL::PlaneSweepMatchingCosts::PLANE_SWEEP_ZNCC,
+          PSL::PlaneSweepOcclusionMode::PLANE_SWEEP_OCCLUSION_BEST_K, 3,
           ref_img_id, minZ, maxZ, cPS, 0);
     }
   }
