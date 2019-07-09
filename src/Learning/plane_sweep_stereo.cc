@@ -336,9 +336,6 @@ bool PlaneSweepStereo::AccumulateCostForPlane(const int ref_img_idx,
     ComputeHomographyToReferenceImage(hyp_plane,
                                       m_buffers->dev_img_map[ref_img_idx].first,
                                       localized_img.second.first, H);
-    for (int i = 0; i < 9; i++) {
-      std::cout << "H[" << i << "] : " << H[i] << std::endl;
-    }
 
     cuda::mvs::PlaneSweepAbsDiffAccum(
         H, scale0, m_buffers->dev_img_map[ref_img_idx].second,

@@ -28,6 +28,7 @@ add_executable(plane_sweep_stereo_test
 
 target_link_libraries(plane_sweep_stereo_test
   psl
+  ${Boost_LIBRARIES}
   ${OpenCV_LIBS}
   ${GLOG_LIBRARIES}
   ${GFLAGS_LIBRARIES}
