@@ -64,7 +64,6 @@ The code is written in C++ and CUDA. To use it you need a CUDA compatible Nvidia
 The following libraries are required:
 
 GCC Toolchain on Linux
-Visual Studio C++ on Windows
 CMake
 Nvidia CUDA
 Boost (system filesystem program_options)
@@ -90,30 +89,6 @@ sh runFisheyePlanesweepTestsLinux.sh
 
 The results are written to the folder PlaneSweepLib/testResults.
 To check if the code runs correctly reference results are provided in the folder PlaneSweepLib/referenceTestResults
-
-
-Instructions Windows
----------------------------------
-
-Open a command prompt and cd to the root directory PlaneSweepLib of the package and run:
-
-mkdir build
-cd build
-cmake -G "Visual Studio 10 Win64" ..    (Replace "Visual Studio 10 Win64" with your version, cmake without arguments provides a list.
-                                        Alternatively use cmake-gui to generate the project files.)
-                                             
-Open the project file PlaneSweepLib/build/PSL.sln with Visual Studio and compile the whole solution in Release mode.
-
-
-The package comes with test data and applications that show how to use the plane sweep code.
-To run the tests on the provided data go to the command prompt and cd to the root directory PlaneSweepLib of the package and run:
-
-runPinholePlanesweepTestsWindows.bat
-runFisheyePlanesweepTestsWindows.bat
-
-The results are written to the folder PlaneSweepLib/testResults.
-To check if the code runs correctly reference results are provided in the folder PlaneSweepLib/referenceTestResults
-
 
 Acknowledgements
 ----------------------------------
