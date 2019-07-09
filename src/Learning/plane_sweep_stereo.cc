@@ -73,42 +73,6 @@ bool ComputeHomographyToReferenceImage(const Eigen::Matrix<double, 4, 1>& plane,
   return true;
 }
 
-/*
-
-bool ComputeHomographyToReferenceImage(const Eigen::Matrix<double, 4, 1>& plane,
-                                       const vis::CameraMatrix<double>& ref_cam,
-                                       const vis::CameraMatrix<double>& src_cam,
-                                       std::vector<float>& H) {
-  H.resize(9);
-  const Eigen::Matrix<double, 3, 3> ref_K = ref_cam.GetK();
-  const Eigen::Matrix<double, 3, 3> src_K = src_cam.GetK();
-  const Eigen::Matrix<double, 3, 3> ref_R = ref_cam.GetR();
-  const Eigen::Matrix<double, 3, 3> src_R = src_cam.GetR();
-  const Eigen::Matrix<double, 3, 1> ref_T = ref_cam.GetT();
-  const Eigen::Matrix<double, 3, 1> src_T = src_cam.GetT();
-  const Eigen::Matrix<double, 3, 1> unit_n = plane.head(3);
-  const Eigen::Matrix<double, 3, 3> rel_R = src_R.transpose() * ref_R;
-  const Eigen::Matrix<double, 3, 1> rel_T = src_R.transpose() * (src_T - ref_T);
-
-  Eigen::Matrix<double, 3, 3> Hmat =
-      src_K * (rel_R + ((double)1) / plane(3) * rel_T * unit_n.transpose()) *
-      ref_K.inverse();
-
-  H[0] = (float)Hmat(0, 0);
-  H[1] = (float)Hmat(0, 1);
-  H[2] = (float)Hmat(0, 2);
-  H[3] = (float)Hmat(1, 0);
-  H[4] = (float)Hmat(1, 1);
-  H[5] = (float)Hmat(1, 2);
-  H[6] = (float)Hmat(2, 0);
-  H[7] = (float)Hmat(2, 1);
-  H[8] = (float)Hmat(2, 2);
-
-  return true;
-}
-
-*/
-
 bool ConvertCvMatToCudaImage(const cv::Mat& img, const double scale,
                              const bool color_enabled,
                              vis::cuda::CudaImage& dev_img) {
@@ -207,28 +171,28 @@ bool PlaneSweepStereo::Initialize(const PlaneSweepStereoParams& params) {
 bool PlaneSweepStereo::Run(const int ref_img_idx) {
   LOG(INFO) << "PlaneSweepStereo::Run()";
 
-  // 0. Planes
+  // Step 0. Prepare Hypothetical Planes
   CreatePlanes(ref_img_idx, m_buffers->dev_img_map, m_params.num_planes,
                m_params.min_z, m_params.max_z, m_buffers->hyp_planes);
 
-  // 1. Buffer Preparaion.
+  // Step 1. Buffer Preparaion.
   PrepareBuffer(ref_img_idx);
 
-  // 2. Compute Accumulation Scale
+  // Step 2. Compute Accumulation Scale
   double accum_scale0, accum_scale1;
   CompuateAccumulationScales(accum_scale0, accum_scale1);
 
   for (unsigned int plane_idx = 0; plane_idx < m_buffers->hyp_planes.size();
        plane_idx++) {
-    // 3. Compute Cost for THIS plane.
+    // Step 3. Compute Cost for THIS plane.
     AccumulateCostForPlane(ref_img_idx, m_buffers->hyp_planes[plane_idx],
                            accum_scale0, accum_scale1);
 
-    // 4. Update Best Plane Buffer.
+    // Step 4. Update Best Plane Buffer.
     UpdateBestPlaneBuffer(plane_idx);
   }
 
-  // 5. Result Calculation.
+  // Step 5. Result Calculation.
   ComputeBestDepth(ref_img_idx);
 
   return true;
@@ -308,24 +272,7 @@ bool PlaneSweepStereo::AccumulateCostForPlane(const int ref_img_idx,
                                               const double scale1) {
   const int width = m_buffers->dev_img_map[ref_img_idx].second.GetWidth();
   const int height = m_buffers->dev_img_map[ref_img_idx].second.GetHeight();
-
   m_buffers->common.dev_cost_accum.Clear(0);
-
-  cv::Mat input;
-  vis::cuda::CudaImage ref_img = m_buffers->dev_img_map[ref_img_idx].second;
-  ref_img.Download(input);
-  cv::imshow("Input", input);
-  cv::waitKey(10);
-
-  cv::Mat tmp1(height, width, CV_32FC1);
-  cv::Mat tmp2(height, width, CV_8UC1);
-
-#if 0
-  m_buffers->common.dev_cost_accum.Download((float*)tmp1.data, tmp1.step);
-  tmp1.convertTo(tmp2, CV_8UC1);
-  cv::resize(tmp2, tmp2, cv::Size(), 1.0, 1.0);
-  cv::imshow("Before", tmp2);
-#endif
 
   for (const auto& localized_img : m_buffers->dev_img_map) {
     // Skip if this is reference image.
@@ -343,12 +290,13 @@ bool PlaneSweepStereo::AccumulateCostForPlane(const int ref_img_idx,
         m_buffers->common.dev_cost_accum);
   }
 
+  cv::Mat tmp1(height, width, CV_32FC1);
+  cv::Mat tmp2(height, width, CV_8UC1);
   m_buffers->common.dev_cost_accum.Download((float*)tmp1.data, tmp1.step);
   tmp1.convertTo(tmp2, CV_8UC1);
   cv::resize(tmp2, tmp2, cv::Size(), 1.0, 1.0);
   cv::imshow("After", tmp2);
   cv::waitKey(10);
-
   FilterAccumulatedCost();
 
   return true;
