@@ -12,7 +12,7 @@ CMAKE_CXX_STANDARD_REQUIRED=ON
 # Library Folder Structure.
 CMAKE_BUILD_TYPE=Debug
 OpenCV_DIR=${ROOT_3RD}/opencv331/installd/share/OpenCV
-Eigen3_DIR=${ROOT_3RD}/eigen334/install/share/eigen3/cmake/
+Eigen3_DIR=${ROOT_3RD}/eigen_repo/install/share/eigen3/cmake/
 
 # GLOGS
 GLOG_INCLUDE_DIRS=/usr/include
