@@ -116,21 +116,19 @@ void CreatePlanes(const int ref_cam_idx,
                   std::map<int, vis::mvs::LocalizedCudaImage>& cams,
                   const int num_planes, const double near_z, const double far_z,
                   std::vector<Eigen::Vector4d>& planes) {
+  // Step 1. Calculate max distance between camera and set it as baseline.
   double baseline = ComputeLargestBaseline(ref_cam_idx, cams);
-
   planes.resize(num_planes);
-
   const Eigen::Matrix3d& K = cams[ref_cam_idx].first.GetK();
   double focal = (K(0, 0) + K(1, 1)) / 2.0;
 
-  // Disp = Baseline * focal / Z
+  // Step 2. Calculate disparity step for plane. (Disp = Baseline * focal / Z)
   double min_disp = baseline * focal / far_z;
   double max_disp = baseline * focal / near_z;
-
-  // Disp step.
   double disp_step = (max_disp - min_disp) / (num_planes - 1);
 
-  // Plane is perpendicular to z axis.
+  // Step 3. Calculate coefficients vector for all hypothetical planes.
+  // All plane is perpendicular to Z axis.
   for (int i = 0; i < num_planes; i++) {
     planes[i].setZero();
     planes[i](2) = -1;
