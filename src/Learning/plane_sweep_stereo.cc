@@ -42,10 +42,10 @@
 
 namespace {
 
-bool ComputeHomographyToReferenceImage(const Eigen::Matrix<double, 4, 1>& plane,
-                                       const vis::CameraMatrix<double>& ref_cam,
-                                       const vis::CameraMatrix<double>& src_cam,
-                                       std::vector<float>& H) {
+bool ComputeHomographyToReferenceImage(const Eigen::Matrix<double, 4, 1> &plane,
+                                       const vis::CameraMatrix<double> &ref_cam,
+                                       const vis::CameraMatrix<double> &src_cam,
+                                       std::vector<float> &H) {
   H.resize(9);
   const Eigen::Matrix<double, 3, 3> ref_K = ref_cam.GetK();
   const Eigen::Matrix<double, 3, 3> src_K = src_cam.GetK();
@@ -73,9 +73,9 @@ bool ComputeHomographyToReferenceImage(const Eigen::Matrix<double, 4, 1>& plane,
   return true;
 }
 
-bool ConvertCvMatToCudaImage(const cv::Mat& img, const double scale,
+bool ConvertCvMatToCudaImage(const cv::Mat &img, const double scale,
                              const bool color_enabled,
-                             vis::cuda::CudaImage& dev_img) {
+                             vis::cuda::CudaImage &dev_img) {
   cv::Mat tmp;
   if (scale < 1.0) {
     cv::resize(img, tmp, cv::Size(), scale, scale, CV_INTER_AREA);
@@ -96,12 +96,13 @@ bool ConvertCvMatToCudaImage(const cv::Mat& img, const double scale,
   dev_img.AllocatePitchedAndUpload(tmp);
 }
 
-double ComputeLargestBaseline(
-    const int ref_cam_idx, std::map<int, vis::mvs::LocalizedCudaImage>& cams) {
+double
+ComputeLargestBaseline(const int ref_cam_idx,
+                       std::map<int, vis::mvs::LocalizedCudaImage> &cams) {
   double largest_baseline = 0.0;
   Eigen::Matrix<double, 3, 1> ref_C = cams[ref_cam_idx].first.GetC();
 
-  for (const auto& cam : cams) {
+  for (const auto &cam : cams) {
     const Eigen::Matrix<double, 3, 1> C = cam.second.first.GetC();
     double baseline = (C - ref_C).norm();
 
@@ -113,13 +114,13 @@ double ComputeLargestBaseline(
 }
 
 void CreatePlanes(const int ref_cam_idx,
-                  std::map<int, vis::mvs::LocalizedCudaImage>& cams,
+                  std::map<int, vis::mvs::LocalizedCudaImage> &cams,
                   const int num_planes, const double near_z, const double far_z,
-                  std::vector<Eigen::Vector4d>& planes) {
+                  std::vector<Eigen::Vector4d> &planes) {
   // Step 1. Calculate max distance between camera and set it as baseline.
   double baseline = ComputeLargestBaseline(ref_cam_idx, cams);
   planes.resize(num_planes);
-  const Eigen::Matrix3d& K = cams[ref_cam_idx].first.GetK();
+  const Eigen::Matrix3d &K = cams[ref_cam_idx].first.GetK();
   double focal = (K(0, 0) + K(1, 1)) / 2.0;
 
   // Step 2. Calculate disparity step for plane. (Disp = Baseline * focal / Z)
@@ -136,7 +137,7 @@ void CreatePlanes(const int ref_cam_idx,
   }
 }
 
-}  // namespace
+} // namespace
 
 namespace vis {
 namespace mvs {
@@ -159,7 +160,7 @@ PlaneSweepStereo::PlaneSweepStereo()
 
 PlaneSweepStereo::~PlaneSweepStereo() {}
 
-bool PlaneSweepStereo::Initialize(const PlaneSweepStereoParams& params) {
+bool PlaneSweepStereo::Initialize(const PlaneSweepStereoParams &params) {
   LOG(INFO) << "PlaneSweepStereo::Initialize()";
   m_params = params;
   vis::cuda::mvs::PlaneSweepInitializeTexture();
@@ -201,8 +202,8 @@ bool PlaneSweepStereo::Finalize() {
   return true;
 }
 
-int PlaneSweepStereo::AddImage(const cv::Mat& img,
-                               const CameraMatrix<double>& cam) {
+int PlaneSweepStereo::AddImage(const cv::Mat &img,
+                               const CameraMatrix<double> &cam) {
   vis::cuda::CudaImage dev_img;
   ConvertCvMatToCudaImage(img, m_params.img_scale, m_params.enable_color,
                           dev_img);
@@ -214,14 +215,14 @@ int PlaneSweepStereo::AddImage(const cv::Mat& img,
   return id;
 }
 
-bool PlaneSweepStereo::DrawColoredDepthMap(cv::Mat& img) {
+bool PlaneSweepStereo::DrawColoredDepthMap(cv::Mat &img) {
   m_buffers->best_depth.ComputeColoredDepthMat(m_params.min_z, m_params.max_z,
                                                img);
 }
 
 // Algorithm main routine.
 bool PlaneSweepStereo::PrepareBuffer(const int ref_img_idx) {
-  cuda::CudaImage& ref_img = m_buffers->dev_img_map[ref_img_idx].second;
+  cuda::CudaImage &ref_img = m_buffers->dev_img_map[ref_img_idx].second;
 
   // Common Buffer
   {
@@ -248,7 +249,7 @@ bool PlaneSweepStereo::PrepareBuffer(const int ref_img_idx) {
 
   // Output Buffer
   {
-    vis::CameraMatrix<double>& ref_cam =
+    vis::CameraMatrix<double> &ref_cam =
         m_buffers->dev_img_map[ref_img_idx].first;
     m_buffers->best_depth = vis::DepthMap<float, double>(
         ref_img.GetWidth(), ref_img.GetHeight(), ref_cam);
@@ -257,31 +258,34 @@ bool PlaneSweepStereo::PrepareBuffer(const int ref_img_idx) {
   return true;
 }
 
-bool PlaneSweepStereo::CompuateAccumulationScales(double& scale0,
-                                                  double& scale1) {
+bool PlaneSweepStereo::CompuateAccumulationScales(double &scale0,
+                                                  double &scale1) {
   scale0 = static_cast<double>(1.0 / (m_buffers->dev_img_map.size() - 1));
   scale1 = 0.0;
   return true;
 }
 
 bool PlaneSweepStereo::AccumulateCostForPlane(const int ref_img_idx,
-                                              const Eigen::Vector4d& hyp_plane,
+                                              const Eigen::Vector4d &hyp_plane,
                                               const double scale0,
                                               const double scale1) {
   const int width = m_buffers->dev_img_map[ref_img_idx].second.GetWidth();
   const int height = m_buffers->dev_img_map[ref_img_idx].second.GetHeight();
   m_buffers->common.dev_cost_accum.Clear(0);
 
-  for (const auto& localized_img : m_buffers->dev_img_map) {
+  for (const auto &localized_img : m_buffers->dev_img_map) {
     // Skip if this is reference image.
     if (localized_img.first == ref_img_idx) {
       continue;
     }
+    // Compute homography between to compare reference image and source image
+    // with respect to THIS Hopothecal plane.
     std::vector<float> H;
     ComputeHomographyToReferenceImage(hyp_plane,
                                       m_buffers->dev_img_map[ref_img_idx].first,
                                       localized_img.second.first, H);
 
+    // Compare pix value by using homography matrix calulated above.
     cuda::mvs::PlaneSweepAbsDiffAccum(
         H, scale0, m_buffers->dev_img_map[ref_img_idx].second,
         m_buffers->dev_img_map[localized_img.first].second,
@@ -290,7 +294,7 @@ bool PlaneSweepStereo::AccumulateCostForPlane(const int ref_img_idx,
 
   cv::Mat tmp1(height, width, CV_32FC1);
   cv::Mat tmp2(height, width, CV_8UC1);
-  m_buffers->common.dev_cost_accum.Download((float*)tmp1.data, tmp1.step);
+  m_buffers->common.dev_cost_accum.Download((float *)tmp1.data, tmp1.step);
   tmp1.convertTo(tmp2, CV_8UC1);
   cv::resize(tmp2, tmp2, cv::Size(), 1.0, 1.0);
   cv::imshow("After", tmp2);
@@ -364,5 +368,5 @@ bool PlaneSweepStereo::DownloadBestCost() { return true; }
 
 bool PlaneSweepStereo::ComputeUniqunessRatio() { return true; }
 
-}  // namespace mvs
-}  // namespace vis
+} // namespace mvs
+} // namespace vis

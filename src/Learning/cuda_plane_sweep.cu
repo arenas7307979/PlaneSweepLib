@@ -305,6 +305,7 @@ __global__ void PlaneSweepComputeBestDepthKernel(
         *((float *)((char *)dev_plane_addr + 3 * dev_plane_pitch) +
           best_plane_idx);
 
+#if 0
     float3 K_ref_inv_Tn;
     K_ref_inv_Tn.x = K_ref_inv_col1.x * plane_normal.x +
                      K_ref_inv_col1.y * plane_normal.y +
@@ -317,17 +318,22 @@ __global__ void PlaneSweepComputeBestDepthKernel(
     K_ref_inv_Tn.z = K_ref_inv_col3.x * plane_normal.x +
                      K_ref_inv_col3.y * plane_normal.y +
                      K_ref_inv_col3.z * plane_normal.z;
+#endif
 
     float3 pos;
     pos.x = x;
     pos.y = y;
     pos.z = 1;
 
+#if 0
     const float denom = K_ref_inv_Tn.x * pos.x + K_ref_inv_Tn.y * pos.y +
                         K_ref_inv_Tn.z * pos.z;
-
     *((float *)((char *)dev_best_depth_addr + y * dev_best_depth_pitch) + x) =
         -planeD / denom;
+#endif
+
+    *((float *)((char *)dev_best_depth_addr + y * dev_best_depth_pitch) + x) =
+        planeD;
   }
 }
 
